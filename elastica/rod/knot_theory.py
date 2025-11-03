@@ -35,26 +35,24 @@ class KnotTheory:
         total_twist = rod.compute_twist()
         total_link = rod.compute_link()
 
-    There are few alternative way of handling edge-condition in computing Link and Writhe.
-    Here, we provide three methods: "next_tangent", "end_to_end", and "net_tangent".
-    The default *type_of_additional_segment* is set to "next_tangent."
+    There are a few alternative ways of handling edge-conditions in computing Link and Writhe.
+    The `type_of_additional_segment` parameter, which defaults to ``"next_tangent"``, can be set to one of the following:
 
-    ========================== =====================================
-    type_of_additional_segment Description
-    ========================== =====================================
-    next_tangent               | Adds a two new point at the begining and end of the center line.
-                               | Distance of these points are given in segment_length.
-                               | Direction of these points are computed using the rod tangents at
-                               | the begining and end.
-    end_to_end                 | Adds a two new point at the begining and end of the center line.
-                               | Distance of these points are given in segment_length.
-                               | Direction of these points are computed using the rod node end
-                               | positions.
-    net_tangent                | Adds a two new point at the begining and end of the center line.
-                               | Distance of these points are given in segment_length. Direction of
-                               | these points are point wise avarege of nodes at the first and
-                               | second half of the rod.
-    ========================== =====================================
+    ``"next_tangent"``
+        Adds two new points at the beginning and end of the center line.
+        The distance of these points is given by `segment_length`.
+        The direction of these points is computed using the rod tangents at
+        the beginning and end.
+    ``"end_to_end"``
+        Adds two new points at the beginning and end of the center line.
+        The distance of these points is given by `segment_length`.
+        The direction of these points is computed using the rod node end
+        positions.
+    ``"net_tangent"``
+        Adds two new points at the beginning and end of the center line.
+        The distance of these points is given by `segment_length`. The direction of
+        these points is the point-wise average of nodes in the first and
+        second half of the rod.=
 
     """
 
@@ -723,6 +721,9 @@ def _compute_additional_segment(
             # Direction of the additional point at the end of the rod
             direction_of_rod_end = center_line[i, :, -1] - center_line[i, :, -2]
             direction_of_rod_end /= np.linalg.norm(direction_of_rod_end)
+
+            beginning_direction[i, :] = direction_of_rod_begin
+            end_direction[i, :] = direction_of_rod_end
     elif type_of_additional_segment == "end_to_end":
         for i in range(timesize):
             # Direction of the additional point at the beginning of the rod
@@ -731,6 +732,9 @@ def _compute_additional_segment(
 
             # Direction of the additional point at the end of the rod
             direction_of_rod_end = -direction_of_rod_begin
+
+            beginning_direction[i, :] = direction_of_rod_begin
+            end_direction[i, :] = direction_of_rod_end
     elif type_of_additional_segment == "net_tangent":
         for i in range(timesize):
             # Direction of the additional point at the beginning of the rod
@@ -745,19 +749,18 @@ def _compute_additional_segment(
             direction_of_rod_begin = average_begin - average_end
             direction_of_rod_begin /= np.linalg.norm(direction_of_rod_begin)
             direction_of_rod_end = -direction_of_rod_begin
+
+            beginning_direction[i, :] = direction_of_rod_begin
+            end_direction[i, :] = direction_of_rod_end
     else:
         raise NotImplementedError("unavailable type_of_additional_segment is given")
 
     # Compute new centerline and beginning/end direction
     for i in range(timesize):
-        first_point = center_line[i, :, 0] + segment_length * direction_of_rod_begin
-        last_point = center_line[i, :, -1] + segment_length * direction_of_rod_end
-
+        first_point = center_line[i, :, 0] + segment_length * beginning_direction[i, :]
+        last_point = center_line[i, :, -1] + segment_length * end_direction[i, :]
         new_center_line[i, :, 1:-1] = center_line[i, :, :]
         new_center_line[i, :, 0] = first_point
         new_center_line[i, :, -1] = last_point
-
-        beginning_direction[i, :] = direction_of_rod_begin
-        end_direction[i, :] = direction_of_rod_end
 
     return new_center_line, beginning_direction, end_direction

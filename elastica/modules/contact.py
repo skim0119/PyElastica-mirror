@@ -6,7 +6,6 @@ Provides the contact interface to apply contact forces between objects
 (rods, rigid bodies, surfaces).
 """
 from typing import Type, Any
-from typing_extensions import Self
 
 import functools
 from elastica.typing import (
@@ -24,10 +23,6 @@ import numpy as np
 from elastica.contact_forces import NoContact
 
 logger = logging.getLogger(__name__)
-
-
-def warnings() -> None:
-    logger.warning("Contact features should be instantiated lastly.")
 
 
 class Contact:
@@ -97,9 +92,6 @@ class Contact:
 
             self._feature_group_synchronize.add_operators(contact, [func])
 
-            if not self._feature_group_synchronize.is_last(contact):
-                warnings()
-
         self._contacts = []
         del self._contacts
 
@@ -137,7 +129,7 @@ class _Contact:
         self._args: Any
         self._kwargs: Any
 
-    def using(self, cls: Type[NoContact], *args: Any, **kwargs: Any) -> Self:
+    def using(self, cls: Type[NoContact], *args: Any, **kwargs: Any) -> None:
         """
         This method is a module to set which contact class is used to apply contact
         between user defined rod-like objects.
@@ -163,7 +155,6 @@ class _Contact:
         self._contact_cls = cls
         self._args = args
         self._kwargs = kwargs
-        return self
 
     def id(self) -> Any:
         return (

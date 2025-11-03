@@ -5,12 +5,14 @@ Base System
 Basic coordinating for multiple, smaller systems that have an independently integrable
 interface (i.e. works with symplectic or explicit routines `timestepper.py`.)
 """
-from typing import TYPE_CHECKING, Type, Generator, Any, overload
+from typing import TYPE_CHECKING, Type, Generator, Any, overload, Callable
 from typing import final
 from elastica.typing import (
     SystemType,
     StaticSystemType,
+    StaticSystemProtocol,
     BlockSystemType,
+    BlockSystemProtocol,
     SystemIdxType,
     OperatorType,
     OperatorCallbackType,
@@ -46,8 +48,8 @@ class BaseSystemCollection(MutableSequence):
         blocks: Callable
             Returns block objects. Should be called after finalize.
 
-    Note
-    ----
+    Notes
+    -----
     We can directly subclass a list for the
     most part, but this is a bad idea, as List is non abstract
     https://stackoverflow.com/q/3945940
@@ -72,6 +74,9 @@ class BaseSystemCollection(MutableSequence):
         self._feature_group_callback: OperatorGroupFIFO[
             OperatorCallbackType, ModuleProtocol
         ] = OperatorGroupFIFO()
+        self._feature_group_on_close: OperatorGroupFIFO[Callable, ModuleProtocol] = (
+            OperatorGroupFIFO()
+        )
         self._feature_group_finalize: list[OperatorFinalizeType] = []
         # We need to initialize our mixin classes
         super().__init__()
@@ -161,8 +166,8 @@ class BaseSystemCollection(MutableSequence):
         Get the index of the system object in the system list.
         System list is private, so this is the only way to get the index of the system object.
 
-        Example
-        -------
+        Examples
+        --------
         >>> system_collection: SystemCollectionProtocol
         >>> system: SystemType
         ...
@@ -244,6 +249,9 @@ class BaseSystemCollection(MutableSequence):
         self._feature_group_finalize.clear()
         del self._feature_group_finalize
 
+        # First callback execution
+        self.apply_callbacks(time=np.float64(0.0), current_step=0)
+
     @final
     def synchronize(self, time: np.float64) -> None:
         """
@@ -281,6 +289,15 @@ class BaseSystemCollection(MutableSequence):
         """
         for func in self._feature_group_callback:
             func(time=time, current_step=current_step)
+
+    @final
+    def close(self) -> None:
+        """
+        Call close functions for all features.
+        Features are registered in _feature_group_on_close.
+        """
+        for func in self._feature_group_on_close:
+            func()
 
 
 if TYPE_CHECKING:

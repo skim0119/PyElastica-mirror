@@ -1,12 +1,19 @@
+from __future__ import annotations
+
 __doc__ = """
 CallBacks
 -----------
 
 Provides the callBack interface to collect data over time (see `callback_functions.py`).
 """
-from typing import Type, Any
-from typing_extensions import Self  # 3.11: from typing import Self
-from elastica.typing import SystemType, SystemIdxType, OperatorFinalizeType
+from types import EllipsisType
+from typing import Type, Any, TypeAlias, cast
+from elastica.typing import (
+    SystemType,
+    SystemIdxType,
+    OperatorFinalizeType,
+    SystemProtocol,
+)
 from .protocol import ModuleProtocol
 
 import functools
@@ -15,6 +22,22 @@ import numpy as np
 
 from elastica.callback_functions import CallBackBaseClass
 from .protocol import SystemCollectionWithCallbackProtocol
+
+
+SystemIdxDSType: TypeAlias = """
+(
+    SystemIdxType
+    | tuple[SystemIdxType, ...]
+    | list[SystemIdxType]
+    | dict[Any, SystemIdxType]
+)
+"""
+
+SystemDSType: TypeAlias = """
+(
+    SystemType | tuple[SystemType, ...] | list[SystemType] | dict[Any, SystemType]
+)
+"""
 
 
 class CallBacks:
@@ -35,7 +58,8 @@ class CallBacks:
         self._feature_group_finalize.append(self._finalize_callback)
 
     def collect_diagnostics(
-        self: SystemCollectionWithCallbackProtocol, system: SystemType
+        self: SystemCollectionWithCallbackProtocol,
+        system: SystemDSType | EllipsisType,
     ) -> ModuleProtocol:
         """
         This method calls user-defined call-back classes for a
@@ -51,12 +75,24 @@ class CallBacks:
         -------
 
         """
-        sys_idx: SystemIdxType = self.get_system_index(system)
+        sys_idx: SystemIdxDSType
+        if system is Ellipsis:
+            sys_idx = tuple([self.get_system_index(sys) for sys in self])
+        elif isinstance(system, list):
+            sys_idx = [self.get_system_index(sys) for sys in system]
+        elif isinstance(system, dict):
+            sys_idx = {key: self.get_system_index(sys) for key, sys in system.items()}
+        elif isinstance(system, tuple):
+            sys_idx = tuple([self.get_system_index(sys) for sys in system])
+        else:
+            # Single entity
+            sys_idx = self.get_system_index(system)
 
         # Create _Constraint object, cache it and return to user
         _callback: ModuleProtocol = _CallBack(sys_idx)
         self._callback_list.append(_callback)
         self._feature_group_callback.append_id(_callback)
+        self._feature_group_on_close.append_id(_callback)
 
         return _callback
 
@@ -66,16 +102,26 @@ class CallBacks:
             sys_id = callback.id()
             callback_instance = callback.instantiate()
 
+            system: SystemDSType
+            if isinstance(sys_id, (tuple, list)):
+                _T = type(sys_id)
+                system = _T([self[sys_id_] for sys_id_ in sys_id])
+            elif isinstance(sys_id, dict):
+                sys_id = cast(dict[Any, SystemIdxType], sys_id)
+                system = {key: self[sys_id_] for key, sys_id_ in sys_id.items()}
+            else:
+                system = self[sys_id]
+
             callback_operator = functools.partial(
-                callback_instance.make_callback, system=self[sys_id]
+                callback_instance.make_callback, system=system
             )
             self._feature_group_callback.add_operators(callback, [callback_operator])
+            self._feature_group_on_close.add_operators(
+                callback, [callback_instance.on_close]
+            )
 
         self._callback_list.clear()
         del self._callback_list
-
-        # First callback execution
-        self.apply_callbacks(time=np.float64(0.0), current_step=0)
 
 
 class _CallBack:
@@ -92,7 +138,7 @@ class _CallBack:
             Arbitrary keyword arguments.
     """
 
-    def __init__(self, sys_idx: SystemIdxType):
+    def __init__(self, sys_idx: SystemIdxDSType):
         """
 
         Parameters
@@ -100,7 +146,7 @@ class _CallBack:
         sys_idx: int
             rod object index
         """
-        self._sys_idx: SystemIdxType = sys_idx
+        self._sys_idx: SystemIdxDSType = sys_idx
         self._callback_cls: Type[CallBackBaseClass]
         self._args: Any
         self._kwargs: Any
@@ -110,7 +156,7 @@ class _CallBack:
         cls: Type[CallBackBaseClass],
         *args: Any,
         **kwargs: Any,
-    ) -> Self:
+    ) -> None:
         """
         This method is a module to set which callback class is used to collect data
         from user defined rod-like object.
@@ -132,9 +178,8 @@ class _CallBack:
         self._callback_cls = cls
         self._args = args
         self._kwargs = kwargs
-        return self
 
-    def id(self) -> SystemIdxType:
+    def id(self) -> SystemIdxDSType:
         return self._sys_idx
 
     def instantiate(self) -> CallBackBaseClass:
