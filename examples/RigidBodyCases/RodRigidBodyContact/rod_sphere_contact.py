@@ -1,4 +1,5 @@
 import numpy as np
+from collections import defaultdict
 from tqdm import tqdm
 import elastica as ea
 from post_processing import plot_video_with_surface
@@ -102,23 +103,22 @@ def main():
     # For rod
     class StraightRodCallBack(ea.CallBackBaseClass):
         """
-        Call back function for two arm octopus
+        Callback function for a straight rod in contact with a sphere.
         """
 
         def __init__(self, step_skip: int, callback_params: dict):
-            ea.CallBackBaseClass.__init__(self)
+            super().__init__()
             self.every = step_skip
             self.callback_params = callback_params
 
         def make_callback(self, system, time, current_step: int):
             if current_step % self.every == 0:
                 self.callback_params["time"].append(time)
-                self.callback_params["step"].append(current_step)
                 self.callback_params["position"].append(
                     system.position_collection.copy()
                 )
                 self.callback_params["radius"].append(system.radius.copy())
-                self.callback_params["com"].append(
+                self.callback_params["center_of_mass"].append(
                     system.compute_position_center_of_mass()
                 )
                 total_energy = (
@@ -132,7 +132,7 @@ def main():
 
     class RigidBodyCallback(ea.CallBackBaseClass):
         """
-        Call back function for two arm octopus
+        Callback function for a rigid sphere.
         """
 
         def __init__(
@@ -140,14 +140,13 @@ def main():
             step_skip: int,
             callback_params: dict,
         ):
-            ea.CallBackBaseClass.__init__(self)  # TODO: Is this necessary?
+            super().__init__()
             self.every = step_skip
             self.callback_params = callback_params
 
         def make_callback(self, system, time, current_step: int):
             if current_step % self.every == 0:
                 self.callback_params["time"].append(time)
-                self.callback_params["step"].append(current_step)
                 self.callback_params["position"].append(
                     system.position_collection.copy()
                 )
@@ -155,11 +154,11 @@ def main():
                     system.director_collection.copy()
                 )
                 self.callback_params["radius"].append(np.array([system.radius.copy()]))
-                self.callback_params["com"].append(
+                self.callback_params["center_of_mass"].append(
                     system.compute_position_center_of_mass()
                 )
 
-    post_processing_dict_list.append(ea.defaultdict(list))
+    post_processing_dict_list.append(defaultdict(list))
     simulator.collect_diagnostics(rod).using(
         StraightRodCallBack,
         step_skip=step_skip,
@@ -167,7 +166,7 @@ def main():
     )
     for _ in range(n_sphere):
         # For rigid body
-        db = ea.defaultdict(list)
+        db = defaultdict(list)
         post_processing_dict_list.append(db)
         simulator.collect_diagnostics(rigid_body).using(
             RigidBodyCallback,

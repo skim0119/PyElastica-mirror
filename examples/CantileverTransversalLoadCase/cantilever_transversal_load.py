@@ -3,11 +3,12 @@ from elastica.boundary_conditions import OneEndFixedBC
 from elastica.external_forces import EndpointForces
 from elastica.timestepper.symplectic_steppers import PositionVerlet
 import elastica as ea
-from examples.convergence_functions import calculate_error_norm
-from cantilever_transversal_load_postprocessing import adjust_square_cross_section
 from matplotlib import pyplot as plt
 from matplotlib.colors import to_rgb
 import json
+
+from convergence_functions import calculate_error_norm
+from setup_helper import adjust_square_cross_section
 
 
 def analytical_results(index):
@@ -26,7 +27,6 @@ def cantilever_subjected_to_a_transversal_load(n_elem=19):
     base_radius = 0.01 / (
         np.pi ** (1 / 2)
     )  # The Cross-sectional area is 1e-4(we assume its equivalent to a square cross-sectional surface with same area)
-    base_area = 1e-4
     density = 1000
     youngs_modulus = 1e9
     poisson_ratio = 0
@@ -39,7 +39,6 @@ def cantilever_subjected_to_a_transversal_load(n_elem=19):
 
     square_rod_sim = SquareRodSimulator()
 
-    density = 1000
     t = np.linspace(0, 0.25 * np.pi, n_elem + 1)
     tmp = np.zeros((3, n_elem + 1), dtype=np.float64)
     tmp[0, :] = -radius * np.cos(t) + 1
@@ -76,7 +75,6 @@ def cantilever_subjected_to_a_transversal_load(n_elem=19):
 
     square_rod_sim.append(square_rod)
 
-    # square_rod_sim.finalize()
     square_rod.rest_kappa[...] = square_rod.kappa
 
     dl = base_length / n_elem
@@ -112,9 +110,8 @@ def cantilever_subjected_to_a_transversal_load(n_elem=19):
     square_rod_sim.finalize()
     print("System finalized")
 
-    # The simulation result from Project3.3.2 with 400 elements/ Tip position Z
-
-    # generate analytical solution array from [400]
+    # The simulation result from Project3.3.2 with 400 elements (tip position Z)
+    # Generate analytical solution array by interpolating from the 400-element reference solution
 
     analytical_results_sub = np.zeros(n_elem + 1)
 

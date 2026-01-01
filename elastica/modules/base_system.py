@@ -10,9 +10,7 @@ from typing import final
 from elastica.typing import (
     SystemType,
     StaticSystemType,
-    StaticSystemProtocol,
     BlockSystemType,
-    BlockSystemProtocol,
     SystemIdxType,
     OperatorType,
     OperatorCallbackType,
@@ -20,33 +18,40 @@ from elastica.typing import (
 )
 
 import numpy as np
+import warnings
 from itertools import chain
 
+from collections import defaultdict
 from collections.abc import MutableSequence
 
-from elastica.rod.rod_base import RodBase
-from elastica.rigidbody.rigid_body import RigidBodyBase
-from elastica.surface.surface_base import SurfaceBase
+from elastica.systems.protocol import StaticSystemProtocol, SystemProtocol
+from elastica.memory_block.protocol import BlockSystemProtocol
+
+from elastica.memory_block.memory_block_rod import MemoryBlockCosseratRod
+from elastica.memory_block.memory_block_rigid_body import MemoryBlockRigidBody
 
 from .memory_block import construct_memory_block_structures
 from .operator_group import OperatorGroupFIFO
 from .protocol import ModuleProtocol
+from ..rod.cosserat_rod import CosseratRod
+from ..rigidbody.sphere import Sphere
+from ..rigidbody.cylinder import Cylinder
 
 
 class BaseSystemCollection(MutableSequence):
     """
     Base System for simulator classes. Every simulation class written by the user
     must be derived from the BaseSystemCollection class; otherwise the simulation will
-    proceed.
+    not proceed.
 
-        Attributes
-        ----------
-        allowed_sys_types: tuple[Type]
-            Tuple of allowed type rod-like objects. Here use a base class for objects, i.e. RodBase.
-        systems: Callable
-            Returns all system objects. Once finalize, block objects are also included.
-        blocks: Callable
-            Returns block objects. Should be called after finalize.
+    Attributes
+    ----------
+    allowed_sys_types: tuple[Type]
+        Tuple of allowed type rod-like objects. Here use a base class for objects, i.e. RodBase.
+    systems: Callable
+        Returns all system objects. Once finalize, block objects are also included.
+    blocks: Callable
+        Returns block objects. Should be called after finalize.
 
     Notes
     -----
@@ -82,15 +87,22 @@ class BaseSystemCollection(MutableSequence):
         super().__init__()
 
         # List of system types/bases that are allowed
-        self.allowed_sys_types: tuple[Type, ...] = (
-            RodBase,
-            RigidBodyBase,
-            SurfaceBase,
+        # By default, any object that is a subclass of StaticSystemProtocol is allowed.
+        # (Technically, any object that is conforms StaticSystemProtocol is allowed.)
+        self.allowed_sys_types: tuple[Type, ...] = (StaticSystemProtocol,)
+
+        # Block support for System types.
+        # If a system type is not in this dictionary, no block will be constructed for it.
+        # (Note, block support is defined explicitly, without derivation from BaseSystem.)
+        self._block_supports: dict[Type[BlockSystemType], list[Type[SystemType]]] = (
+            defaultdict(list)
         )
+        self._block_supports[MemoryBlockCosseratRod].append(CosseratRod)
+        self._block_supports[MemoryBlockRigidBody].extend([Sphere, Cylinder])
 
         # List of systems to be integrated
         self.__systems: list[StaticSystemType] = []
-        self.__final_blocks: list[BlockSystemType] = []
+        self.__final_systems: list[SystemType] = []
 
         # Flag Finalize: Finalizing twice will cause an error,
         # but the error message is very misleading
@@ -116,6 +128,13 @@ class BaseSystemCollection(MutableSequence):
             raise RuntimeError(
                 f"The system {sys_to_be_added.__class__} requires the following modules:\n"
                 f"{sys_to_be_added.REQUISITE_MODULES}\n"
+            )
+        if id(sys_to_be_added) in [id(system) for system in self.__systems]:
+            # Warning for duplicate system instance
+            warnings.warn(
+                f"System {sys_to_be_added.__class__} is already in the system collection.\n"
+                "Adding multiple instance is technically allowed, but it is not recommended.",
+                UserWarning,
             )
         return True
 
@@ -147,16 +166,62 @@ class BaseSystemCollection(MutableSequence):
         return str(self.__systems)
 
     @final
+    def append_allowed_types(self, additional_types: Type[SystemType]) -> None:
+        """
+        Append the allowed system types.
+        In order to add block support, use `enable_block_supports`.
+        """
+        self.allowed_sys_types += (additional_types,)
+
+    @final
     def extend_allowed_types(
         self, additional_types: tuple[Type[SystemType], ...]
     ) -> None:
+        """
+        Extend the allowed system types. Typically used for building custom extensions.
+        In order to add block support, use `enable_block_supports`.
+        """
         self.allowed_sys_types += additional_types
 
     @final
-    def override_allowed_types(
+    def _override_allowed_types(
         self, allowed_types: tuple[Type[SystemType], ...]
     ) -> None:
+        """
+        Override the allowed system types.
+        Only used for testing purposes.
+        """
         self.allowed_sys_types = allowed_types
+
+    @final
+    def enable_block_supports(
+        self,
+        system_type: Type[SystemType],
+        block_type: Type[BlockSystemType],
+    ) -> None:
+        """
+        Enable block support for a system type.
+        If the system type already has block support enabled, it will be overridden.
+        (In case user wants different implementation of the memory block.)
+
+
+        Parameters
+        ----------
+        system_type: Type[SystemType]
+            System type to enable block support for.
+        block_type: Type[BlockSystemType]
+            Block type to enable for the system type.
+
+        Examples
+        --------
+        >>> simulator.append_allowed_types(CustomRod)
+        >>> simulator.enable_block_supports(CustomRod, CustomMemoryBlock)
+        """
+        for btype in self._block_supports:
+            if system_type in self._block_supports[btype]:
+                self._block_supports[btype].remove(system_type)
+                break
+        self._block_supports[block_type].append(system_type)
 
     @final
     def get_system_index(
@@ -216,11 +281,12 @@ class BaseSystemCollection(MutableSequence):
             yield system
 
     @final
-    def block_systems(self) -> Generator[BlockSystemType, None, None]:
+    def final_systems(self) -> Generator[SystemType, None, None]:
         """
-        Iterate over all block systems in the system collection.
+        Iterate over all systems in the system collection.
+        This generator is used to pass the systems to the timestepper.
         """
-        for block in self.__final_blocks:
+        for block in self.__final_systems:
             yield block
 
     @final
@@ -230,16 +296,26 @@ class BaseSystemCollection(MutableSequence):
         all rod-like objects to the simulator as well as all boundary conditions, callbacks, etc.,
         acting on these rod-like objects. After the finalize method called,
         the user cannot add new features to the simulator class.
+
+        Parameters
+        ----------
+        verbose: bool
+            If True, will print verbose output.
         """
 
         assert not self._finalize_flag, "The finalize cannot be called twice."
         self._finalize_flag = True
 
         # Construct memory block
-        self.__final_blocks = construct_memory_block_structures(self.__systems)
-        # FIXME: We need this to make ring-rod working.
-        # But probably need to be refactored
-        self.__systems.extend(self.__final_blocks)
+        blocks, non_blocked_systems = construct_memory_block_structures(
+            self.__systems,
+            self._block_supports,
+        )
+        self.__systems.extend(blocks)  # blocks are also systems
+
+        # Finalize the list of systems to run stepping.
+        self.__final_systems.extend(blocks)
+        self.__final_systems.extend(non_blocked_systems)
 
         # Recurrent call finalize functions for all components.
         for finalize in self._feature_group_finalize:

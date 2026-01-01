@@ -12,6 +12,7 @@ the analytical solution.
 # isort:skip_file
 
 import numpy as np
+from collections import defaultdict
 from matplotlib import pyplot as plt
 
 import elastica as ea
@@ -20,7 +21,7 @@ import elastica as ea
 # Simulation Setup
 # ----------------
 # We define a simulator class that inherits from the necessary mixins.
-# This makes constraints, forces, and damping evailable to the system.
+# This makes constraints, forces, and damping available to the system.
 
 
 class StretchingBeamSimulator(
@@ -129,7 +130,7 @@ class AxialStretchingCallBack(ea.CallBackBaseClass):
             return
 
 
-recorded_history: dict[str, list] = ea.defaultdict(list)
+recorded_history: dict[str, list] = defaultdict(list)
 stretch_sim.collect_diagnostics(stretchable_rod).using(
     AxialStretchingCallBack, step_skip=200, callback_params=recorded_history
 )

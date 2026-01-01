@@ -8,37 +8,38 @@ rigid bodies) using joints (see `joints.py`).
 from typing import Type, cast, Any
 from elastica.typing import (
     SystemIdxType,
-    OperatorFinalizeType,
     ConnectionIndex,
     RodType,
     RigidBodyType,
 )
 import numpy as np
 import functools
-from elastica.joint import FreeJoint
+from elastica.joint import ConnectionBase
 
-from .protocol import ConnectedSystemCollectionProtocol, ModuleProtocol
+from .protocol import SystemCollectionProtocol, ModuleProtocol
 
 
-class Connections:
+class Connections(SystemCollectionProtocol):
     """
     The Connections class is a module for connecting rod-like objects using joints selected
     by the user. To connect two rod-like objects, the simulator class must be derived from
     the Connections class.
 
-        Attributes
-        ----------
-        _connections: list
-            List of joint classes defined for rod-like objects.
+    Attributes
+    ----------
+    _connections: list
+        List of joint classes defined for rod-like objects.
     """
 
-    def __init__(self: ConnectedSystemCollectionProtocol) -> None:
-        self._connections: list[ModuleProtocol] = []
+    _connections: list[ModuleProtocol]
+
+    def __init__(self) -> None:
+        self._connections = []
         super(Connections, self).__init__()
         self._feature_group_finalize.append(self._finalize_connections)
 
     def connect(
-        self: ConnectedSystemCollectionProtocol,
+        self,
         first_rod: "RodType | RigidBodyType",
         second_rod: "RodType | RigidBodyType",
         first_connect_idx: ConnectionIndex = (),
@@ -80,7 +81,7 @@ class Connections:
 
         return _connect
 
-    def _finalize_connections(self: ConnectedSystemCollectionProtocol) -> None:
+    def _finalize_connections(self) -> None:
         # From stored _Connect objects, instantiate the joints and store it
         # dev : the first indices stores the
         # (first rod index, second_rod_idx, connection_idx_on_first_rod, connection_idx_on_second_rod)
@@ -90,7 +91,7 @@ class Connections:
             first_sys_idx, second_sys_idx, first_connect_idx, second_connect_idx = (
                 connection.id()
             )
-            connect_instance: FreeJoint = connection.instantiate()
+            connect_instance: ConnectionBase = connection.instantiate()
 
             func_force = functools.partial(
                 connect_instance.apply_forces,
@@ -156,7 +157,7 @@ class _Connect:
         self._second_sys_n_lim: int = second_sys_nlim
         self.first_sys_connection_idx: ConnectionIndex = ()
         self.second_sys_connection_idx: ConnectionIndex = ()
-        self._connect_cls: Type[FreeJoint]
+        self._connect_cls: Type[ConnectionBase]
 
     def set_index(
         self, first_idx: ConnectionIndex, second_idx: ConnectionIndex
@@ -239,7 +240,7 @@ class _Connect:
 
     def using(
         self,
-        cls: Type[FreeJoint],
+        cls: Type[ConnectionBase],
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -261,8 +262,8 @@ class _Connect:
 
         """
         assert issubclass(
-            cls, FreeJoint
-        ), "{} is not a valid joint class. Did you forget to derive from FreeJoint?".format(
+            cls, ConnectionBase
+        ), "{} is not a valid connection class. Did you forget to derive from ConnectionBase?".format(
             cls
         )
         self._connect_cls = cls
@@ -279,7 +280,7 @@ class _Connect:
             self.second_sys_connection_idx,
         )
 
-    def instantiate(self) -> FreeJoint:
+    def instantiate(self) -> ConnectionBase:
         if not hasattr(self, "_connect_cls"):
             raise RuntimeError(
                 "No connections provided to link rod id {0}"
@@ -293,5 +294,5 @@ class _Connect:
         except (TypeError, IndexError):
             raise TypeError(
                 r"Unable to construct connection class.\n"
-                r"Did you provide all necessary joint properties?"
+                r"Did you provide all necessary connection properties?"
             )

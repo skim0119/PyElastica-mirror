@@ -2,7 +2,7 @@
 Continuum Snake
 ===============
 
-Snake friction case from X. Zhang et. al. Nat. Comm. 2021
+Snake friction case from X. Zhang et al. Nat. Comm. 2021
 
 This Elastica tutorial explains how to setup a Cosserat rod simulation to simulate a slithering snake. It covers many of the basics of setting up and running simulations with Elastica.
 
@@ -16,10 +16,11 @@ This slithering snake example includes gravitational forces, friction forces, an
 
 Getting Started
 ---------------
-To set up the simulation, the first thing you need to do is import the necessary classes. As with the Timoshenko bean, we need to import modules which allow us to more easily construct different simulation systems. We also need to import a rod class, all the necessary forces to be applied, timestepping functions, and callback classes.
+To set up the simulation, the first thing you need to do is import the necessary classes. As with the Timoshenko beam, we need to import modules which allow us to more easily construct different simulation systems. We also need to import a rod class, all the necessary forces to be applied, timestepping functions, and callback classes.
 """
 
 import os
+from collections import defaultdict
 import numpy as np
 import elastica as ea
 from numpy.typing import NDArray
@@ -164,7 +165,7 @@ def run_snake(
         """
 
         def __init__(self, step_skip: int, callback_params: dict) -> None:
-            ea.CallBackBaseClass.__init__(self)
+            super().__init__()
             self.every = step_skip
             self.callback_params = callback_params
 
@@ -225,7 +226,7 @@ def run_snake(
     rendering_fps = 60
     step_skip = int(1.0 / (rendering_fps * time_step))
 
-    pp_list: dict[str, list] = ea.defaultdict(list)
+    pp_list: dict[str, list] = defaultdict(list)
     snake_sim.collect_diagnostics(shearable_rod).using(
         ContinuumSnakeCallBack, step_skip=step_skip, callback_params=pp_list
     )
