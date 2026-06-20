@@ -76,6 +76,9 @@ dev = [
     "mypy-extensions",
     "flake8",
 ]
+gpu = [
+    "jax>=0.6.2",
+]
 
 [tool.black]
 # https://github.com/psf/black
