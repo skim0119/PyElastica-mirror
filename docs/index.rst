@@ -43,6 +43,7 @@ If you are interested to contribute, please read `contribution-guide`_ first.
    :caption: User Guide
 
    guide/workflow
+   guide/jax
    guide/discretization
    guide/visualization
 
