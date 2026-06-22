@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -287,6 +288,39 @@ def _max_abs_diff(first: np.ndarray, second: np.ndarray) -> float:
     return float(np.max(np.abs(first - second)))
 
 
+def _time_average(n_iter: int, fn) -> float:  # type: ignore[no-untyped-def]
+    assert n_iter > 0, "n_iter must be positive."
+    start = time.perf_counter()
+    for _ in range(n_iter):
+        fn()
+    return (time.perf_counter() - start) / n_iter
+
+
+def _snapshot_jax_state_to_host(
+    state: dict[str, jax.Array],
+) -> dict[str, np.ndarray]:
+    host_state = jax.device_get(state)
+    return {key: np.asarray(value).copy() for key, value in host_state.items()}
+
+
+def _restore_jax_state_from_host(
+    host_state: dict[str, np.ndarray],
+    device: jax.Device,
+) -> dict[str, jax.Array]:
+    return {
+        key: jax.device_put(np.asarray(value), device=device)
+        for key, value in host_state.items()
+    }
+
+
+def _emit_report(lines: list[str], log_path: Path | None) -> None:
+    report = "\n".join(lines)
+    print(report)
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(report + "\n", encoding="utf-8")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("auto", "cpu", "cuda", "mps"), default="cuda")
@@ -296,6 +330,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--final-time", type=float, default=0.1)
     parser.add_argument("--time-step", type=float, default=1.0e-4)
     parser.add_argument("--warmup-runs", type=int, default=1)
+    parser.add_argument("--io-iterations", type=int, default=10)
+    parser.add_argument("--log", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -306,6 +342,7 @@ def main() -> None:
     assert args.final_time > 0.0, "final-time must be positive."
     assert args.time_step > 0.0, "time-step must be positive."
     assert args.warmup_runs >= 0, "warmup-runs must be nonnegative."
+    assert args.io_iterations > 0, "io-iterations must be positive."
 
     device = _select_device(args.backend)
     dtype = np.dtype(np.float32 if args.dtype == "float32" else np.float64)
@@ -317,6 +354,7 @@ def main() -> None:
     snapped_final_time = total_steps * args.time_step
     backend_label = "jax-cpu" if device.platform == "cpu" else f"jax-{device.platform}"
 
+    cpu_prep_start = time.perf_counter()
     cpu_sim, cpu_rods = _build_cpu_sim(
         n_snakes=args.n_snakes,
         n_elem=args.n_elem,
@@ -328,7 +366,33 @@ def main() -> None:
         gravitational_acc=-9.80665,
         time_step=args.time_step,
     )
+    cpu_prep_elapsed = time.perf_counter() - cpu_prep_start
     cpu_stepper = ea.PositionVerlet()
+
+    with tempfile.TemporaryDirectory(prefix="snake_numba_restart_") as restart_dir:
+        ea.save_state(cpu_sim, directory=restart_dir, time=np.float64(0.0))
+        cpu_restart_ready_start = time.perf_counter()
+        cpu_restart_sim, _ = _build_cpu_sim(
+            n_snakes=args.n_snakes,
+            n_elem=args.n_elem,
+            period=2.0,
+            base_length=0.35,
+            density=1000.0,
+            youngs_modulus=1.0e6,
+            poisson_ratio=0.5,
+            gravitational_acc=-9.80665,
+            time_step=args.time_step,
+        )
+        ea.load_state(cpu_restart_sim, directory=restart_dir)
+        cpu_restart_ready_elapsed = time.perf_counter() - cpu_restart_ready_start
+        cpu_restart_save_avg = _time_average(
+            args.io_iterations,
+            lambda: ea.save_state(cpu_sim, directory=restart_dir, time=np.float64(0.0)),
+        )
+        cpu_restart_load_avg = _time_average(
+            args.io_iterations,
+            lambda: ea.load_state(cpu_restart_sim, directory=restart_dir),
+        )
 
     time_value = np.float64(0.0)
     start = time.perf_counter()
@@ -341,6 +405,7 @@ def main() -> None:
     cpu_state = _collect_cpu_state(cpu_rods)
 
     with jax.default_device(device):
+        jax_prep_start = time.perf_counter()
         jax_sim, jax_block = _build_jax_sim(
             device=device,
             device_dtype=dtype,
@@ -354,7 +419,28 @@ def main() -> None:
             gravitational_acc=-9.80665,
             time_step=args.time_step,
         )
+        jax.block_until_ready(jax_block.position_collection_device)
+        jax_prep_elapsed = time.perf_counter() - jax_prep_start
         jax_stepper = ea.PositionVerletGPU()
+        initial_host_state = _snapshot_jax_state_to_host(jax_block.jax_get_state())
+
+        jax_repush_ready_start = time.perf_counter()
+        repushed_state = _restore_jax_state_from_host(initial_host_state, device)
+        jax.block_until_ready(repushed_state["position_collection"])
+        jax_block.jax_set_state(repushed_state)
+        jax_repush_ready_elapsed = time.perf_counter() - jax_repush_ready_start
+
+        jax_save_avg = _time_average(
+            args.io_iterations,
+            lambda: _snapshot_jax_state_to_host(jax_block.jax_get_state()),
+        )
+
+        def _load_jax_snapshot() -> None:
+            restored_state = _restore_jax_state_from_host(initial_host_state, device)
+            jax.block_until_ready(restored_state["position_collection"])
+            jax_block.jax_set_state(restored_state)
+
+        jax_load_avg = _time_average(args.io_iterations, _load_jax_snapshot)
 
         for _ in range(args.warmup_runs):
             initial_state = dict(jax_block.jax_get_state())
@@ -378,15 +464,26 @@ def main() -> None:
         jax_elapsed = time.perf_counter() - start
         jax_state = _collect_jax_state(jax_block, args.n_snakes)
 
-    print(f"device: {device}")
-    print(f"dtype: {dtype}")
-    print(f"n_snakes: {args.n_snakes}")
-    print(f"n_elem: {args.n_elem}")
-    print(f"steps: {total_steps}")
-    print(f"numba_seconds: {cpu_elapsed:.6f}")
-    print(f"{backend_label}_seconds: {jax_elapsed:.6f}")
-    print(f"speedup: {cpu_elapsed / jax_elapsed:.3f}x")
-    print("Max absolute differences vs numba:")
+    report_lines = [
+        f"device: {device}",
+        f"dtype: {dtype}",
+        f"n_snakes: {args.n_snakes}",
+        f"n_elem: {args.n_elem}",
+        f"steps: {total_steps}",
+        f"io_iterations: {args.io_iterations}",
+        f"numba_prep_seconds: {cpu_prep_elapsed:.6f}",
+        f"numba_restart_ready_seconds: {cpu_restart_ready_elapsed:.6f}",
+        f"numba_restart_save_avg_seconds: {cpu_restart_save_avg:.6f}",
+        f"numba_restart_load_avg_seconds: {cpu_restart_load_avg:.6f}",
+        f"{backend_label}_prep_seconds: {jax_prep_elapsed:.6f}",
+        f"{backend_label}_repush_ready_seconds: {jax_repush_ready_elapsed:.6f}",
+        f"{backend_label}_save_avg_seconds: {jax_save_avg:.6f}",
+        f"{backend_label}_load_avg_seconds: {jax_load_avg:.6f}",
+        f"numba_seconds: {cpu_elapsed:.6f}",
+        f"{backend_label}_seconds: {jax_elapsed:.6f}",
+        f"speedup: {cpu_elapsed / jax_elapsed:.3f}x",
+        "Max absolute differences vs numba:",
+    ]
     for key in (
         "position_collection",
         "director_collection",
@@ -395,7 +492,10 @@ def main() -> None:
         "sigma",
         "kappa",
     ):
-        print(f"  {key}: {_max_abs_diff(jax_state[key], cpu_state[key]):.6e}")
+        report_lines.append(
+            f"  {key}: {_max_abs_diff(jax_state[key], cpu_state[key]):.6e}"
+        )
+    _emit_report(report_lines, args.log)
 
 
 if __name__ == "__main__":
