@@ -67,6 +67,19 @@ def main() -> None:
     cpu_sim, cpu_rods = build_cpu_sim(**config)
     numba_instantiate_elapsed = time.perf_counter() - numba_instantiate_start
     cpu_stepper = ea.PositionVerlet()
+    if args.warmup_runs > 0:
+        cpu_warmup_sim, _ = build_cpu_sim(**config)
+        cpu_warmup_stepper = ea.PositionVerlet()
+        warmup_time_value = np.float64(0.0)
+        for _ in range(args.warmup_runs):
+            warmup_time_value = np.float64(0.0)
+            for _ in range(args.steps):
+                warmup_time_value = cpu_warmup_stepper.step(
+                    cpu_warmup_sim,
+                    warmup_time_value,
+                    np.float64(args.dt),
+                )
+
     time_value = np.float64(0.0)
     start = time.perf_counter()
     for _ in range(args.steps):
@@ -114,6 +127,7 @@ def main() -> None:
         f"n_elem: {args.n_elem}",
         f"steps: {args.steps}",
         f"dt: {args.dt}",
+        f"warmup_runs: {args.warmup_runs}",
         f"numba_instantiate_seconds: {numba_instantiate_elapsed:.6f}",
         f"{backend_label}_instantiate_seconds: {jax_instantiate_elapsed:.6f}",
         f"numba_seconds: {cpu_elapsed:.6f}",
