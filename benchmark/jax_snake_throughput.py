@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from pathlib import Path
 import time
 
@@ -44,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
     parser.add_argument("--dt", type=float, default=DEFAULT_DT)
     parser.add_argument("--warmup-runs", type=int, default=1)
+    parser.add_argument(
+        "--transfer-guard",
+        choices=("allow", "log", "disallow", "log_explicit", "disallow_explicit"),
+        default="allow",
+    )
     parser.add_argument("--log", type=Path, default=None)
     return parser.parse_args()
 
@@ -98,8 +104,24 @@ def main() -> None:
         jax.block_until_ready(jax_block.position_collection_device)
         jax_instantiate_elapsed = time.perf_counter() - jax_instantiate_start
         jax_stepper = ea.PositionVerletGPU()
-        for _ in range(args.warmup_runs):
-            initial_state = dict(jax_block.jax_get_state())
+        guard_context = (
+            jax.transfer_guard(args.transfer_guard)
+            if args.transfer_guard != "allow"
+            else nullcontext()
+        )
+        with guard_context:
+            for _ in range(args.warmup_runs):
+                initial_state = dict(jax_block.jax_get_state())
+                jax_stepper.integrate(
+                    jax_sim,
+                    time=np.float64(0.0),
+                    final_time=final_time,
+                    dt=np.float64(args.dt),
+                )
+                jax.block_until_ready(jax_block.position_collection_device)
+                jax_block.jax_set_state(initial_state)
+
+            start = time.perf_counter()
             jax_stepper.integrate(
                 jax_sim,
                 time=np.float64(0.0),
@@ -107,17 +129,7 @@ def main() -> None:
                 dt=np.float64(args.dt),
             )
             jax.block_until_ready(jax_block.position_collection_device)
-            jax_block.jax_set_state(initial_state)
-
-        start = time.perf_counter()
-        jax_stepper.integrate(
-            jax_sim,
-            time=np.float64(0.0),
-            final_time=final_time,
-            dt=np.float64(args.dt),
-        )
-        jax.block_until_ready(jax_block.position_collection_device)
-        jax_elapsed = time.perf_counter() - start
+            jax_elapsed = time.perf_counter() - start
         jax_state = collect_jax_state(jax_block, n_snakes)
 
     report_lines = [
@@ -128,6 +140,7 @@ def main() -> None:
         f"steps: {args.steps}",
         f"dt: {args.dt}",
         f"warmup_runs: {args.warmup_runs}",
+        f"transfer_guard: {args.transfer_guard}",
         f"numba_instantiate_seconds: {numba_instantiate_elapsed:.6f}",
         f"{backend_label}_instantiate_seconds: {jax_instantiate_elapsed:.6f}",
         f"numba_seconds: {cpu_elapsed:.6f}",
