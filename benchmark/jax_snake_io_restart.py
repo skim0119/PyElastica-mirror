@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-elem", type=int, default=DEFAULT_N_ELEM)
     parser.add_argument("--dt", type=float, default=DEFAULT_DT)
     parser.add_argument("--iterations", type=int, default=10)
+    parser.add_argument(
+        "--no-numba",
+        action="store_true",
+        help="Skip the Numba save/load and instantiation benchmarks.",
+    )
     parser.add_argument("--no-external-loads", action="store_true")
     parser.add_argument("--log", type=Path, default=None)
     return parser.parse_args()
@@ -70,25 +75,33 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="snake_restart_io_") as tmp_dir:
         tmp_path = Path(tmp_dir)
-        numba_dir = tmp_path / "numba_restart"
         jax_file = tmp_path / "jax_block_state.npz"
 
-        cpu_sim, _ = build_cpu_sim(**config)
-        ea.save_state(cpu_sim, directory=str(numba_dir), time=np.float64(0.0))
-        cpu_load_sim, _ = build_cpu_sim(**config)
+        numba_instantiate_avg = None
+        numba_save_avg = None
+        numba_load_avg = None
+        if not args.no_numba:
+            numba_dir = tmp_path / "numba_restart"
+            cpu_sim, _ = build_cpu_sim(**config)
+            ea.save_state(cpu_sim, directory=str(numba_dir), time=np.float64(0.0))
+            cpu_load_sim, _ = build_cpu_sim(**config)
 
-        def _instantiate_numba_sim() -> None:
-            build_cpu_sim(**config)
+            def _instantiate_numba_sim() -> None:
+                build_cpu_sim(**config)
 
-        numba_instantiate_avg = time_average(args.iterations, _instantiate_numba_sim)
-        numba_save_avg = time_average(
-            args.iterations,
-            lambda: ea.save_state(cpu_sim, directory=str(numba_dir), time=np.float64(0.0)),
-        )
-        numba_load_avg = time_average(
-            args.iterations,
-            lambda: ea.load_state(cpu_load_sim, directory=str(numba_dir)),
-        )
+            numba_instantiate_avg = time_average(
+                args.iterations, _instantiate_numba_sim
+            )
+            numba_save_avg = time_average(
+                args.iterations,
+                lambda: ea.save_state(
+                    cpu_sim, directory=str(numba_dir), time=np.float64(0.0)
+                ),
+            )
+            numba_load_avg = time_average(
+                args.iterations,
+                lambda: ea.load_state(cpu_load_sim, directory=str(numba_dir)),
+            )
 
         with jax.default_device(device):
             jax_sim, jax_block = build_jax_sim(
@@ -135,15 +148,30 @@ def main() -> None:
         f"n_snakes: {n_snakes}",
         f"n_elem: {args.n_elem}",
         f"iterations: {args.iterations}",
+        f"no_numba: {args.no_numba}",
         f"no_external_loads: {args.no_external_loads}",
-        f"numba_instantiate_avg_seconds: {numba_instantiate_avg:.6f}",
-        f"numba_save_avg_seconds: {numba_save_avg:.6f}",
-        f"numba_load_avg_seconds: {numba_load_avg:.6f}",
         f"{backend_label}_instantiate_avg_seconds: {jax_instantiate_avg:.6f}",
         f"{backend_label}_save_avg_seconds: {jax_save_avg:.6f}",
         f"{backend_label}_load_avg_seconds: {jax_load_avg:.6f}",
         f"temp_dir: {tmp_path}",
     ]
+    if not args.no_numba:
+        assert numba_instantiate_avg is not None, (
+            "Numba instantiation timing must be available when Numba is enabled."
+        )
+        assert numba_save_avg is not None, (
+            "Numba save timing must be available when Numba is enabled."
+        )
+        assert numba_load_avg is not None, (
+            "Numba load timing must be available when Numba is enabled."
+        )
+        report_lines.extend(
+            (
+                f"numba_instantiate_avg_seconds: {numba_instantiate_avg:.6f}",
+                f"numba_save_avg_seconds: {numba_save_avg:.6f}",
+                f"numba_load_avg_seconds: {numba_load_avg:.6f}",
+            )
+        )
     emit_report(report_lines, args.log)
 
 
