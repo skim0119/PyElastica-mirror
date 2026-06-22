@@ -57,6 +57,9 @@ def test_memory_block_rigid_body_jax_to_from_device_updates_bodies():
     rigid_body = MockRigidBody()
     block = _make_block(rigid_body)
 
+    updated_mass = np.asarray(block._device_state["mass"]) + 1.25
+    block._device_state["mass"] = jax.device_put(updated_mass, device=CPU_DEVICE)
+
     updated_position = np.asarray(block._device_state["position_collection"]) + 3.5
     block._device_state["position_collection"] = jax.device_put(
         updated_position, device=CPU_DEVICE
@@ -67,10 +70,12 @@ def test_memory_block_rigid_body_jax_to_from_device_updates_bodies():
         updated_velocity, device=CPU_DEVICE
     )
 
-    block.from_device(attrs=("position_collection", "velocity_collection"))
+    block.from_device(attrs=("mass", "position_collection", "velocity_collection"))
 
+    assert_array_equal(block.mass, updated_mass)
     assert_array_equal(block.position_collection, updated_position)
     assert_array_equal(block.velocity_collection, updated_velocity)
+    assert_array_equal(np.asarray(rigid_body.mass).reshape(1), updated_mass)
     assert_array_equal(rigid_body.position_collection, updated_position)
     assert_array_equal(rigid_body.velocity_collection, updated_velocity)
 

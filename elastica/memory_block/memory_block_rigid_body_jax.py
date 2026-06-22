@@ -321,6 +321,11 @@ class MemoryBlockRigidBodyJax(RigidBodyBase, _RigidRodSymplecticStepperMixin):
     def _push_block_state_to_systems(self, attrs: Sequence[str]) -> None:
         for system_idx, system in enumerate(self._systems):
             for attr in attrs:
+                if attr in _SCALAR_ATTRS:
+                    system.__dict__[attr] = np.asarray(
+                        getattr(self, attr)[system_idx]
+                    ).reshape(())
+                    continue
                 np.copyto(
                     system.__dict__[attr],
                     getattr(self, attr)[..., system_idx : system_idx + 1],
