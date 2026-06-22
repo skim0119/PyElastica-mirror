@@ -30,7 +30,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
         "This benchmark requires JAX. Install the optional GPU extra first."
     ) from exc
 
-from elastica._jax_linalg import _jax_batch_matvec
+from elastica._jax_linalg import _jax_batch_cross, _jax_batch_matvec
 
 
 jax.config.update("jax_enable_x64", True)
@@ -108,6 +108,23 @@ def _scatter_add_vector_batch(
     array: jax.Array, indices: jax.Array, values: jax.Array
 ) -> jax.Array:
     return array.at[:, indices].add(jnp.moveaxis(values, 0, 1))
+
+
+def _batch_matvec_over_rods(
+    matrix_collection: jax.Array,
+    vector_collection: jax.Array,
+) -> jax.Array:
+    return jax.vmap(_jax_batch_matvec, in_axes=(0, 0))(matrix_collection, vector_collection)
+
+
+def _batch_cross_over_rods(
+    first_vector_collection: jax.Array,
+    second_vector_collection: jax.Array,
+) -> jax.Array:
+    return jax.vmap(_jax_batch_cross, in_axes=(0, 0))(
+        first_vector_collection,
+        second_vector_collection,
+    )
 
 
 def _node_to_element_position_batch(position_collection: jax.Array) -> jax.Array:
@@ -236,18 +253,14 @@ class SnakeMuscleTorquesBlockJax(ea.NoBlockOpJax):
             torque_local,
             (directors.shape[0], torque_local.shape[1], torque_local.shape[2]),
         )
-        torque_world = jax.vmap(_jax_batch_matvec, in_axes=(0, 0))(
-            directors, torque_local
-        )
+        torque_world = _batch_matvec_over_rods(directors, torque_local)
         external_torques = state["external_torques"]
         external_torques = external_torques.at[:, self.elem_indices[:, 1:]].add(
             jnp.moveaxis(torque_world[:, :, 1:], 0, 1)
         )
         previous_directors = directors[:, :, :, :-1]
         next_local = torque_local[:, :, 1:]
-        previous_world = jax.vmap(_jax_batch_matvec, in_axes=(0, 0))(
-            previous_directors, next_local
-        )
+        previous_world = _batch_matvec_over_rods(previous_directors, next_local)
         external_torques = external_torques.at[:, self.elem_indices[:, :-1]].add(
             -jnp.moveaxis(previous_world, 0, 1)
         )
@@ -308,11 +321,16 @@ class GravityPlaneContactBlockJax(ea.NoBlockOpJax):
         mass = _gather_scalar_batch(state["mass"], self.node_indices)
         radius = _gather_scalar_batch(state["radius"], self.elem_indices)
         tangents = _gather_vector_batch(state["tangents"], self.elem_indices)
+        directors = _gather_tensor_batch(state["director_collection"], self.elem_indices)
+        omegas = _gather_vector_batch(state["omega_collection"], self.elem_indices)
         internal_forces = _gather_vector_batch(
             state["internal_forces"], self.node_indices
         )
         external_forces = _gather_vector_batch(
             state["external_forces"], self.node_indices
+        )
+        external_torques = _gather_vector_batch(
+            state["external_torques"], self.elem_indices
         )
 
         external_forces = external_forces + jnp.asarray(self.gravity, dtype=dtype)[
@@ -386,25 +404,54 @@ class GravityPlaneContactBlockJax(ea.NoBlockOpJax):
         velocity_along_axial_direction = (
             axial_direction * velocity_mag_along_axial_direction[:, None, :]
         )
-        rolling_direction = jnp.cross(axial_direction, plane_normal, axis=1)
+        velocity_sign_along_axial_direction = jnp.sign(
+            velocity_mag_along_axial_direction
+        )
+        kinetic_mu = 0.5 * (
+            jnp.asarray(self.kinetic_mu_forward, dtype=dtype)
+            * (1.0 + velocity_sign_along_axial_direction)
+            + jnp.asarray(self.kinetic_mu_backward, dtype=dtype)
+            * (1.0 - velocity_sign_along_axial_direction)
+        )
+        rolling_direction = _batch_cross_over_rods(
+            axial_direction,
+            jnp.broadcast_to(plane_normal, axial_direction.shape),
+        )
+        torque_arm = -plane_normal * radius[:, None, :]
         velocity_mag_along_rolling_direction = jnp.sum(
             element_velocity * rolling_direction, axis=1
         )
-        velocity_along_rolling_direction = (
-            rolling_direction * velocity_mag_along_rolling_direction[:, None, :]
+        directors_transpose = jnp.transpose(directors, (0, 2, 1, 3))
+        rotation_velocity = _batch_matvec_over_rods(
+            directors_transpose,
+            _batch_cross_over_rods(
+                omegas,
+                _batch_matvec_over_rods(directors, torque_arm),
+            ),
+        )
+        rotation_velocity_along_rolling_direction = jnp.sum(
+            rotation_velocity * rolling_direction, axis=1
+        )
+        slip_velocity_mag_along_rolling_direction = (
+            velocity_mag_along_rolling_direction
+            + rotation_velocity_along_rolling_direction
+        )
+        slip_velocity_along_rolling_direction = (
+            rolling_direction * slip_velocity_mag_along_rolling_direction[:, None, :]
         )
         slip_function_along_axial_direction = _find_slipping_elements_batch(
             velocity_along_axial_direction,
             jnp.asarray(self.slip_velocity_tol, dtype=dtype),
         )
         slip_function_along_rolling_direction = _find_slipping_elements_batch(
-            velocity_along_rolling_direction,
+            slip_velocity_along_rolling_direction,
             jnp.asarray(self.slip_velocity_tol, dtype=dtype),
         )
-        kinetic_mu = jnp.where(
-            velocity_mag_along_axial_direction > 0.0,
-            jnp.asarray(self.kinetic_mu_forward, dtype=dtype),
-            jnp.asarray(self.kinetic_mu_backward, dtype=dtype),
+        unitized_total_velocity = (
+            slip_velocity_along_rolling_direction + velocity_along_axial_direction
+        )
+        unitized_total_velocity = unitized_total_velocity / (
+            jnp.linalg.norm(unitized_total_velocity + 1.0e-14, axis=1)[:, None, :]
         )
         kinetic_friction_force_along_axial_direction = (
             -(
@@ -412,7 +459,13 @@ class GravityPlaneContactBlockJax(ea.NoBlockOpJax):
             )[:, None, :]
             * kinetic_mu[:, None, :]
             * plane_response_force_mag[:, None, :]
+            * jnp.sum(unitized_total_velocity * axial_direction, axis=1)[:, None, :]
             * axial_direction
+        )
+        kinetic_friction_force_along_axial_direction = jnp.where(
+            no_contact[:, None, :],
+            0.0,
+            kinetic_friction_force_along_axial_direction,
         )
         kinetic_friction_force_along_rolling_direction = (
             -(
@@ -420,20 +473,41 @@ class GravityPlaneContactBlockJax(ea.NoBlockOpJax):
             )[:, None, :]
             * jnp.asarray(self.kinetic_mu_sideways, dtype=dtype)
             * plane_response_force_mag[:, None, :]
+            * jnp.sum(unitized_total_velocity * rolling_direction, axis=1)[:, None, :]
             * rolling_direction
         )
-        total_contact_force = (
-            plane_response_force_total
-            + kinetic_friction_force_along_axial_direction
-            + kinetic_friction_force_along_rolling_direction
+        kinetic_friction_force_along_rolling_direction = jnp.where(
+            no_contact[:, None, :],
+            0.0,
+            kinetic_friction_force_along_rolling_direction,
         )
-        external_forces = external_forces + _elements_to_nodes_batch(total_contact_force)
+        external_forces = (
+            external_forces + _elements_to_nodes_batch(plane_response_force_total)
+        )
+        external_forces = external_forces + _elements_to_nodes_batch(
+            kinetic_friction_force_along_axial_direction
+        )
+        external_forces = external_forces + _elements_to_nodes_batch(
+            kinetic_friction_force_along_rolling_direction
+        )
+        external_torques = external_torques + _batch_matvec_over_rods(
+            directors,
+            _batch_cross_over_rods(
+                torque_arm,
+                kinetic_friction_force_along_rolling_direction,
+            ),
+        )
 
         updated = dict(state)
         updated["external_forces"] = _scatter_set_vector_batch(
             state["external_forces"],
             self.node_indices,
             external_forces,
+        )
+        updated["external_torques"] = _scatter_set_vector_batch(
+            state["external_torques"],
+            self.elem_indices,
+            external_torques,
         )
         return updated
 
