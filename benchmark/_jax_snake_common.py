@@ -18,6 +18,8 @@ import numpy as np
 
 import elastica as ea
 from examples.ContinuumSnakeGPUCase.run_continuum_snake_gpu import (
+    SnakeMuscleTorquesJax,
+    SnakePlaneContactJax,
     build_rod,
     default_b_coeff,
 )
@@ -731,7 +733,14 @@ def build_jax_sim(
 
     if include_external_loads:
         sim.operate_block(ea.CosseratRod).using(
-            GravityPlaneContactBlockJax,
+            SnakeMuscleTorquesJax,
+            b_coeff=b_coeff,
+            period=period,
+            base_length=base_length,
+            gravitational_acc=gravitational_acc,
+        )
+        sim.operate_block(ea.CosseratRod).using(
+            SnakePlaneContactJax,
             plane_origin=np.array([0.0, -base_length * 0.011, 0.0], dtype=np.float64),
             plane_normal=np.array([0.0, 1.0, 0.0], dtype=np.float64),
             slip_velocity_tol=1.0e-8,
@@ -739,16 +748,9 @@ def build_jax_sim(
             nu=1.0e-6,
             static_mu_array=static_mu_array,
             kinetic_mu_array=kinetic_mu_array,
-            gravitational_acc=gravitational_acc,
         )
         sim.operate_block(ea.CosseratRod).using(
-            SnakeMuscleTorquesBlockJax,
-            b_coeff=b_coeff,
-            period=period,
-            base_length=base_length,
-        )
-        sim.operate_block(ea.CosseratRod).using(
-            AnalyticalLinearDamperBlockJax,
+            ea.AnalyticalLinearDamperJax,
             time_step=np.float64(time_step),
             damping_constant=DEFAULT_DAMPING,
         )
