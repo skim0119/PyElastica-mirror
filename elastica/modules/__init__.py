@@ -11,5 +11,4 @@ from .forcing import Forcing
 from .callbacks import CallBacks
 from .damping import Damping
 from .contact import Contact
-from .jax_compatible import JAXCompatible
 from .jax_ops import JAXOps

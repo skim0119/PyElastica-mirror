@@ -1,11 +1,23 @@
-"""JAX-backed memory block for Cosserat rods with explicit host/device sync."""
+"""JAX-backed memory block for Cosserat rods."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, Iterable, Literal, Sequence
 
 import numpy as np
 
+from elastica._jax_calculus import (
+    _jax_average as _jax_position_average,
+    _jax_difference as _jax_position_difference,
+)
+from elastica._jax_linalg import (
+    _jax_batch_cross,
+    _jax_batch_dot,
+    _jax_batch_matmul,
+    _jax_batch_matvec,
+)
+from elastica._jax_rotations import _jax_get_rotation_matrix, _jax_inv_rotate
 from elastica._synchronize_periodic_boundary import (
     _synchronize_periodic_boundary_of_matrix_collection,
     _synchronize_periodic_boundary_of_scalar_collection,
@@ -73,137 +85,56 @@ _VORONOI_ATTRS: tuple[str, ...] = (
 _SYNCABLE_ATTRS: tuple[str, ...] = _NODE_ATTRS + _ELEMENT_ATTRS + _VORONOI_ATTRS
 
 
-def _jax_batch_matmul(
-    first_matrix_collection: jax.Array, second_matrix_collection: jax.Array
-) -> jax.Array:
-    out = jnp.empty_like(second_matrix_collection)
-    out = out.at[0, 0, :].set(
-        first_matrix_collection[0, 0, :] * second_matrix_collection[0, 0, :]
-        + first_matrix_collection[0, 1, :] * second_matrix_collection[1, 0, :]
-        + first_matrix_collection[0, 2, :] * second_matrix_collection[2, 0, :]
-    )
-    out = out.at[0, 1, :].set(
-        first_matrix_collection[0, 0, :] * second_matrix_collection[0, 1, :]
-        + first_matrix_collection[0, 1, :] * second_matrix_collection[1, 1, :]
-        + first_matrix_collection[0, 2, :] * second_matrix_collection[2, 1, :]
-    )
-    out = out.at[0, 2, :].set(
-        first_matrix_collection[0, 0, :] * second_matrix_collection[0, 2, :]
-        + first_matrix_collection[0, 1, :] * second_matrix_collection[1, 2, :]
-        + first_matrix_collection[0, 2, :] * second_matrix_collection[2, 2, :]
-    )
-    out = out.at[1, 0, :].set(
-        first_matrix_collection[1, 0, :] * second_matrix_collection[0, 0, :]
-        + first_matrix_collection[1, 1, :] * second_matrix_collection[1, 0, :]
-        + first_matrix_collection[1, 2, :] * second_matrix_collection[2, 0, :]
-    )
-    out = out.at[1, 1, :].set(
-        first_matrix_collection[1, 0, :] * second_matrix_collection[0, 1, :]
-        + first_matrix_collection[1, 1, :] * second_matrix_collection[1, 1, :]
-        + first_matrix_collection[1, 2, :] * second_matrix_collection[2, 1, :]
-    )
-    out = out.at[1, 2, :].set(
-        first_matrix_collection[1, 0, :] * second_matrix_collection[0, 2, :]
-        + first_matrix_collection[1, 1, :] * second_matrix_collection[1, 2, :]
-        + first_matrix_collection[1, 2, :] * second_matrix_collection[2, 2, :]
-    )
-    out = out.at[2, 0, :].set(
-        first_matrix_collection[2, 0, :] * second_matrix_collection[0, 0, :]
-        + first_matrix_collection[2, 1, :] * second_matrix_collection[1, 0, :]
-        + first_matrix_collection[2, 2, :] * second_matrix_collection[2, 0, :]
-    )
-    out = out.at[2, 1, :].set(
-        first_matrix_collection[2, 0, :] * second_matrix_collection[0, 1, :]
-        + first_matrix_collection[2, 1, :] * second_matrix_collection[1, 1, :]
-        + first_matrix_collection[2, 2, :] * second_matrix_collection[2, 1, :]
-    )
-    out = out.at[2, 2, :].set(
-        first_matrix_collection[2, 0, :] * second_matrix_collection[0, 2, :]
-        + first_matrix_collection[2, 1, :] * second_matrix_collection[1, 2, :]
-        + first_matrix_collection[2, 2, :] * second_matrix_collection[2, 2, :]
-    )
-    return out
+@dataclass(frozen=True)
+class JAXRodViewMetadata:
+    block_state_idx: int
+    node_slice: slice
+    element_slice: slice
+    voronoi_slice: slice
+
+    def slice_for_attr(self, attr: str) -> slice:
+        if attr in _NODE_ATTRS:
+            return self.node_slice
+        if attr in _ELEMENT_ATTRS:
+            return self.element_slice
+        if attr in _VORONOI_ATTRS:
+            return self.voronoi_slice
+        raise AttributeError(f"Unsupported rod-view attribute {attr!r}")
 
 
-def _jax_batch_matvec(
-    matrix_collection: jax.Array, vector_collection: jax.Array
-) -> jax.Array:
-    out = jnp.empty_like(vector_collection)
-    out = out.at[0, :].set(
-        matrix_collection[0, 0, :] * vector_collection[0, :]
-        + matrix_collection[0, 1, :] * vector_collection[1, :]
-        + matrix_collection[0, 2, :] * vector_collection[2, :]
-    )
-    out = out.at[1, :].set(
-        matrix_collection[1, 0, :] * vector_collection[0, :]
-        + matrix_collection[1, 1, :] * vector_collection[1, :]
-        + matrix_collection[1, 2, :] * vector_collection[2, :]
-    )
-    out = out.at[2, :].set(
-        matrix_collection[2, 0, :] * vector_collection[0, :]
-        + matrix_collection[2, 1, :] * vector_collection[1, :]
-        + matrix_collection[2, 2, :] * vector_collection[2, :]
-    )
-    return out
+class JAXRodView:
+    """Rod-local facade over explicit block state for JAX operator kernels."""
 
+    def __init__(
+        self,
+        state: dict[str, object],
+        metadata: JAXRodViewMetadata,
+        *,
+        updates: dict[str, object] | None = None,
+    ) -> None:
+        object.__setattr__(self, "_state", state)
+        object.__setattr__(self, "_metadata", metadata)
+        object.__setattr__(self, "_updates", {} if updates is None else dict(updates))
 
-def _jax_get_rotation_matrix(scale: float, axis_collection: jax.Array) -> jax.Array:
-    v0, v1, v2 = axis_collection
-    theta = jnp.sqrt(v0 * v0 + v1 * v1 + v2 * v2)
-    theta_eps = theta + jnp.asarray(1.0e-14, dtype=axis_collection.dtype)
-    v0 = v0 / theta_eps
-    v1 = v1 / theta_eps
-    v2 = v2 / theta_eps
+    def __getattr__(self, attr: str) -> object:
+        if attr.startswith("_"):
+            raise AttributeError(attr)
+        source = self._updates.get(attr, self._state[attr])
+        attr_slice = self._metadata.slice_for_attr(attr)
+        return source[..., attr_slice]
 
-    theta = theta * scale
-    sin_theta = jnp.sin(theta)
-    one_minus_cos_theta = 1.0 - jnp.cos(theta)
+    def __setattr__(self, attr: str, value: object) -> None:
+        if attr.startswith("_"):
+            object.__setattr__(self, attr, value)
+            return
+        base = self._updates.get(attr, self._state[attr])
+        attr_slice = self._metadata.slice_for_attr(attr)
+        self._updates[attr] = base.at[..., attr_slice].set(value)
 
-    entries = (
-        1.0 - one_minus_cos_theta * (v1 * v1 + v2 * v2),
-        sin_theta * v2 + one_minus_cos_theta * v0 * v1,
-        -sin_theta * v1 + one_minus_cos_theta * v0 * v2,
-        -sin_theta * v2 + one_minus_cos_theta * v0 * v1,
-        1.0 - one_minus_cos_theta * (v0 * v0 + v2 * v2),
-        sin_theta * v0 + one_minus_cos_theta * v1 * v2,
-        sin_theta * v1 + one_minus_cos_theta * v0 * v2,
-        -sin_theta * v0 + one_minus_cos_theta * v1 * v2,
-        1.0 - one_minus_cos_theta * (v0 * v0 + v1 * v1),
-    )
-    return jnp.stack(entries, axis=0).reshape(3, 3, axis_collection.shape[1])
-
-
-def _jax_batch_cross(
-    first_vector_collection: jax.Array, second_vector_collection: jax.Array
-) -> jax.Array:
-    out = jnp.empty_like(first_vector_collection)
-    out = out.at[0, :].set(
-        first_vector_collection[1, :] * second_vector_collection[2, :]
-        - first_vector_collection[2, :] * second_vector_collection[1, :]
-    )
-    out = out.at[1, :].set(
-        first_vector_collection[2, :] * second_vector_collection[0, :]
-        - first_vector_collection[0, :] * second_vector_collection[2, :]
-    )
-    out = out.at[2, :].set(
-        first_vector_collection[0, :] * second_vector_collection[1, :]
-        - first_vector_collection[1, :] * second_vector_collection[0, :]
-    )
-    return out
-
-
-def _jax_batch_dot(
-    first_vector_collection: jax.Array, second_vector_collection: jax.Array
-) -> jax.Array:
-    return jnp.sum(first_vector_collection * second_vector_collection, axis=0)
-
-
-def _jax_position_difference(position_collection: jax.Array) -> jax.Array:
-    return position_collection[:, 1:] - position_collection[:, :-1]
-
-
-def _jax_position_average(vector: jax.Array) -> jax.Array:
-    return 0.5 * (vector[1:] + vector[:-1])
+    def commit(self) -> dict[str, object]:
+        updated = dict(self._state)
+        updated.update(self._updates)
+        return updated
 
 
 def _jax_reset_vector_ghost(
@@ -284,59 +215,6 @@ def _jax_trapezoidal_for_block_structure(
     return temp_collection
 
 
-def _jax_inv_rotate(director_collection: jax.Array) -> jax.Array:
-    current = director_collection[:, :, :-1]
-    nxt = director_collection[:, :, 1:]
-
-    v0 = (
-        nxt[2, 0, :] * current[1, 0, :]
-        + nxt[2, 1, :] * current[1, 1, :]
-        + nxt[2, 2, :] * current[1, 2, :]
-        - nxt[1, 0, :] * current[2, 0, :]
-        - nxt[1, 1, :] * current[2, 1, :]
-        - nxt[1, 2, :] * current[2, 2, :]
-    )
-    v1 = (
-        nxt[0, 0, :] * current[2, 0, :]
-        + nxt[0, 1, :] * current[2, 1, :]
-        + nxt[0, 2, :] * current[2, 2, :]
-        - nxt[2, 0, :] * current[0, 0, :]
-        - nxt[2, 1, :] * current[0, 1, :]
-        - nxt[2, 2, :] * current[0, 2, :]
-    )
-    v2 = (
-        nxt[1, 0, :] * current[0, 0, :]
-        + nxt[1, 1, :] * current[0, 1, :]
-        + nxt[1, 2, :] * current[0, 2, :]
-        - nxt[0, 0, :] * current[1, 0, :]
-        - nxt[0, 1, :] * current[1, 1, :]
-        - nxt[0, 2, :] * current[1, 2, :]
-    )
-
-    trace = (
-        nxt[0, 0, :] * current[0, 0, :]
-        + nxt[0, 1, :] * current[0, 1, :]
-        + nxt[0, 2, :] * current[0, 2, :]
-        + nxt[1, 0, :] * current[1, 0, :]
-        + nxt[1, 1, :] * current[1, 1, :]
-        + nxt[1, 2, :] * current[1, 2, :]
-        + nxt[2, 0, :] * current[2, 0, :]
-        + nxt[2, 1, :] * current[2, 1, :]
-        + nxt[2, 2, :] * current[2, 2, :]
-    )
-    trace = jnp.clip(trace, -1.0, 3.0)
-    theta = jnp.arccos(0.5 * trace - 0.5) + jnp.asarray(1.0e-14, dtype=trace.dtype)
-    magnitude = -0.5 * theta / jnp.sin(theta)
-
-    out = jnp.empty(
-        (3, director_collection.shape[2] - 1), dtype=director_collection.dtype
-    )
-    out = out.at[0, :].set(v0 * magnitude)
-    out = out.at[1, :].set(v1 * magnitude)
-    out = out.at[2, :].set(v2 * magnitude)
-    return out
-
-
 @jax.jit
 def _jax_compute_internal_forces_and_torques(
     position_collection: jax.Array,
@@ -367,20 +245,7 @@ def _jax_compute_internal_forces_and_torques(
     ghost_voronoi_idx: jax.Array,
     periodic_boundary_elems_idx: jax.Array,
     periodic_boundary_voronoi_idx: jax.Array,
-) -> tuple[
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-]:
+) -> tuple[jax.Array, ...]:
     position_diff = _jax_position_difference(position_collection)
     lengths = jnp.sqrt(jnp.sum(position_diff * position_diff, axis=0)) + jnp.asarray(
         1.0e-14, dtype=position_collection.dtype
@@ -970,11 +835,11 @@ class MemoryBlockCosseratRodJax(RodBase, _RodSymplecticStepperMixin):
     ) -> None:
         target_device = device if device is not None else self._initial_device
         for attr in self._normalize_attr_names(attrs):
-            device_array = jnp.asarray(
-                np.asarray(getattr(self, attr)), dtype=self._device_dtype
-            )
+            host_array = np.asarray(getattr(self, attr), dtype=self._device_dtype)
             if target_device is not None:
-                device_array = jax.device_put(device_array, device=target_device)
+                device_array = jax.device_put(host_array, device=target_device)
+            else:
+                device_array = jnp.asarray(host_array, dtype=self._device_dtype)
             self._device_state[attr] = device_array
         self._update_device_metadata(device=target_device)
         if target_device is not None:
@@ -1082,7 +947,37 @@ class MemoryBlockCosseratRodJax(RodBase, _RodSymplecticStepperMixin):
             device=self.position_collection_device.device,
         )
 
-    def compute_internal_forces_and_torques(self, time: np.float64) -> None:
+    def jax_get_state(self) -> dict[str, jax.Array]:
+        return dict(self._device_state)
+
+    def jax_set_state(self, state: dict[str, jax.Array]) -> None:
+        self._device_state = dict(state)
+        self._refresh_device_views()
+        self._device_dirty = True
+
+    def jax_kinematic_step(
+        self,
+        state: dict[str, jax.Array],
+        time: np.float64,
+        prefac: np.float64,
+    ) -> dict[str, jax.Array]:
+        position_collection, director_collection = _jax_update_kinematics(
+            state["position_collection"],
+            state["director_collection"],
+            state["velocity_collection"],
+            state["omega_collection"],
+            jnp.asarray(prefac, dtype=self._device_dtype),
+        )
+        updated = dict(state)
+        updated["position_collection"] = position_collection
+        updated["director_collection"] = director_collection
+        return updated
+
+    def jax_compute_internal_forces_and_torques(
+        self,
+        state: dict[str, jax.Array],
+        time: np.float64,
+    ) -> dict[str, jax.Array]:
         (
             lengths,
             tangents,
@@ -1097,105 +992,89 @@ class MemoryBlockCosseratRodJax(RodBase, _RodSymplecticStepperMixin):
             internal_forces,
             internal_torques,
         ) = _jax_compute_internal_forces_and_torques(
-            self._device_state["position_collection"],
-            self._device_state["velocity_collection"],
-            self._device_state["volume"],
-            self._device_state["lengths"],
-            self._device_state["tangents"],
-            self._device_state["radius"],
-            self._device_state["rest_lengths"],
-            self._device_state["rest_voronoi_lengths"],
-            self._device_state["dilatation"],
-            self._device_state["dilatation_rate"],
-            self._device_state["voronoi_dilatation"],
-            self._device_state["director_collection"],
-            self._device_state["sigma"],
-            self._device_state["rest_sigma"],
-            self._device_state["shear_matrix"],
-            self._device_state["internal_stress"],
-            self._device_state["internal_forces"],
-            self._device_state["mass_second_moment_of_inertia"],
-            self._device_state["omega_collection"],
-            self._device_state["internal_torques"],
-            self._device_state["bend_matrix"],
-            self._device_state["rest_kappa"],
-            self._device_state["kappa"],
-            self._device_state["internal_couple"],
+            state["position_collection"],
+            state["velocity_collection"],
+            state["volume"],
+            state["lengths"],
+            state["tangents"],
+            state["radius"],
+            state["rest_lengths"],
+            state["rest_voronoi_lengths"],
+            state["dilatation"],
+            state["dilatation_rate"],
+            state["voronoi_dilatation"],
+            state["director_collection"],
+            state["sigma"],
+            state["rest_sigma"],
+            state["shear_matrix"],
+            state["internal_stress"],
+            state["internal_forces"],
+            state["mass_second_moment_of_inertia"],
+            state["omega_collection"],
+            state["internal_torques"],
+            state["bend_matrix"],
+            state["rest_kappa"],
+            state["kappa"],
+            state["internal_couple"],
             self._device_metadata["ghost_elems_idx"],
             self._device_metadata["ghost_voronoi_idx"],
             self._device_metadata["periodic_boundary_elems_idx"],
             self._device_metadata["periodic_boundary_voronoi_idx"],
         )
-        self._device_state["lengths"] = lengths
-        self._device_state["tangents"] = tangents
-        self._device_state["radius"] = radius
-        self._device_state["dilatation"] = dilatation
-        self._device_state["dilatation_rate"] = dilatation_rate
-        self._device_state["voronoi_dilatation"] = voronoi_dilatation
-        self._device_state["sigma"] = sigma
-        self._device_state["kappa"] = kappa
-        self._device_state["internal_stress"] = internal_stress
-        self._device_state["internal_couple"] = internal_couple
-        self._device_state["internal_forces"] = internal_forces
-        self._device_state["internal_torques"] = internal_torques
-        self._device_dirty = True
+        updated = dict(state)
+        updated["lengths"] = lengths
+        updated["tangents"] = tangents
+        updated["radius"] = radius
+        updated["dilatation"] = dilatation
+        updated["dilatation_rate"] = dilatation_rate
+        updated["voronoi_dilatation"] = voronoi_dilatation
+        updated["sigma"] = sigma
+        updated["kappa"] = kappa
+        updated["internal_stress"] = internal_stress
+        updated["internal_couple"] = internal_couple
+        updated["internal_forces"] = internal_forces
+        updated["internal_torques"] = internal_torques
+        return updated
 
-    def update_accelerations(self, time: np.float64, dt: np.float64) -> None:
+    def jax_dynamic_step(
+        self,
+        state: dict[str, jax.Array],
+        time: np.float64,
+        dt: np.float64,
+    ) -> dict[str, jax.Array]:
         acceleration_collection, alpha_collection = _jax_update_accelerations(
-            self._device_state["internal_forces"],
-            self._device_state["external_forces"],
-            self._device_state["mass"],
-            self._device_state["inv_mass_second_moment_of_inertia"],
-            self._device_state["internal_torques"],
-            self._device_state["external_torques"],
-            self._device_state["dilatation"],
+            state["internal_forces"],
+            state["external_forces"],
+            state["mass"],
+            state["inv_mass_second_moment_of_inertia"],
+            state["internal_torques"],
+            state["external_torques"],
+            state["dilatation"],
         )
-        self._device_state["acceleration_collection"] = acceleration_collection
-        self._device_state["alpha_collection"] = alpha_collection
-        self._refresh_device_views()
-        self._device_dirty = True
-
-    def update_kinematics(self, time: np.float64, prefac: np.float64) -> None:
-        position_collection, director_collection = _jax_update_kinematics(
-            self._device_state["position_collection"],
-            self._device_state["director_collection"],
-            self._device_state["velocity_collection"],
-            self._device_state["omega_collection"],
-            self._device_scalar(prefac),
-        )
-        self._device_state["position_collection"] = position_collection
-        self._device_state["director_collection"] = director_collection
-        self._refresh_device_views()
-        self._device_dirty = True
-
-    def update_dynamics(self, time: np.float64, prefac: np.float64) -> None:
         velocity_collection, omega_collection = _jax_update_dynamics(
-            self._device_state["velocity_collection"],
-            self._device_state["omega_collection"],
-            self._device_state["acceleration_collection"],
-            self._device_state["alpha_collection"],
-            self._device_scalar(prefac),
+            state["velocity_collection"],
+            state["omega_collection"],
+            acceleration_collection,
+            alpha_collection,
+            jnp.asarray(dt, dtype=self._device_dtype),
         )
-        self._device_state["velocity_collection"] = velocity_collection
-        self._device_state["omega_collection"] = omega_collection
-        self._refresh_device_views()
-        self._device_dirty = True
+        updated = dict(state)
+        updated["acceleration_collection"] = acceleration_collection
+        updated["alpha_collection"] = alpha_collection
+        updated["velocity_collection"] = velocity_collection
+        updated["omega_collection"] = omega_collection
+        return updated
 
-    def zeroed_out_external_forces_and_torques(self, time: np.float64) -> None:
+    def jax_zero_external_loads(
+        self,
+        state: dict[str, jax.Array],
+        time: np.float64,
+    ) -> dict[str, jax.Array]:
         external_forces, external_torques = _jax_zero_external_loads(
-            self._device_state["external_forces"],
-            self._device_state["external_torques"],
+            state["external_forces"],
+            state["external_torques"],
         )
-        self._device_state["external_forces"] = external_forces
-        self._device_state["external_torques"] = external_torques
-        self._device_dirty = True
-
-    def jax_position_verlet_run(
-        self, *, time: np.float64, dt: np.float64, n_steps: int
-    ) -> np.float64:
-        raise NotImplementedError(
-            "MemoryBlockCosseratRodJax does not yet support fully device-side "
-            "Position Verlet rollout. The outer JAX loop exists now, but this block "
-            "still needs device-side internal-force/torque kernels and device-side "
-            "operator phases before it can replace a user Python loop."
-        )
+        updated = dict(state)
+        updated["external_forces"] = external_forces
+        updated["external_torques"] = external_torques
+        return updated

@@ -1,233 +1,258 @@
-"""GPU-oriented symplectic timesteppers with explicit host/device sync."""
+"""GPU-oriented Position Verlet timestepper."""
 
 from collections.abc import Iterable
+from typing import Any, Protocol
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 
-from elastica.timestepper.symplectic_steppers import PositionVerlet
+
+JAXPyTree = Any
 
 
-class PositionVerletGPU(PositionVerlet):
+class JAXBlock(Protocol):
     """
-    Position Verlet stepper for device-backed block systems.
+    Minimal block interface required for a JAX-owned timestep loop.
 
-    Parameters
-    ----------
-    sync_host_operations : bool
-        If ``True``, host-only operators such as forcing/contact/damping/callbacks are
-        allowed by synchronizing the device state back to the host around each host
-        phase. If ``False``, the stepper raises when those phases are populated.
-    sync_callbacks : bool
-        If ``True``, synchronize state back to host before callback execution.
+    Notes
+    -----
+    All ``jax_*`` methods below must behave as pure transforms on PyTree state.
+    They must not mutate Python object fields when used inside a JAX loop.
+    The only host-side mutation point is ``jax_set_state(...)`` after rollout.
     """
 
-    def __init__(
+    def jax_get_state(self) -> JAXPyTree: ...
+
+    def jax_set_state(self, state: JAXPyTree) -> None: ...
+
+    def jax_kinematic_step(
         self,
+        state: JAXPyTree,
+        time: np.float64,
+        prefac: np.float64,
+    ) -> JAXPyTree: ...
+
+    def jax_dynamic_step(
+        self,
+        state: JAXPyTree,
+        time: np.float64,
+        dt: np.float64,
+    ) -> JAXPyTree: ...
+
+    def jax_compute_internal_forces_and_torques(
+        self,
+        state: JAXPyTree,
+        time: np.float64,
+    ) -> JAXPyTree: ...
+
+    def jax_zero_external_loads(
+        self,
+        state: JAXPyTree,
+        time: np.float64,
+    ) -> JAXPyTree: ...
+
+
+class JAXCompatibleSystems(Protocol):
+    """
+    Minimal collection interface required for a JAX-owned timestep loop.
+
+    Notes
+    -----
+    Constraint/forcing/contact/damping phases must also be exposed as pure state
+    transforms. Host callbacks are intentionally excluded from the loop contract.
+    """
+
+    def final_systems(self) -> Iterable[JAXBlock]: ...
+
+    def jax_constrain_values(
+        self,
+        states: tuple[JAXPyTree, ...],
+        time: np.float64,
+    ) -> tuple[JAXPyTree, ...]: ...
+
+    def jax_synchronize(
+        self,
+        states: tuple[JAXPyTree, ...],
+        time: np.float64,
+    ) -> tuple[JAXPyTree, ...]: ...
+
+    def jax_constrain_rates(
+        self,
+        states: tuple[JAXPyTree, ...],
+        time: np.float64,
+    ) -> tuple[JAXPyTree, ...]: ...
+
+
+class PositionVerletGPU:
+    """Dedicated Position Verlet integrator for device-backed systems."""
+
+    def __init__(self) -> None:
+        self._compiled_rollout_cache: dict[tuple[int, int], Any] = {}
+
+    @staticmethod
+    def _body_fn(
+        _,
+        carry,
         *,
-        sync_host_operations: bool = False,
-        sync_callbacks: bool = False,
-    ) -> None:
-        super().__init__()
-        self.sync_host_operations = sync_host_operations
-        self.sync_callbacks = sync_callbacks
+        systems: tuple[JAXBlock, ...],
+        system_collection: JAXCompatibleSystems,
+        dt_jax: jax.Array,
+        half_dt_jax: jax.Array,
+    ):
+        step_time, step_states = carry
 
-    def _has_host_operators(self, system_collection) -> bool:  # type: ignore[no-untyped-def]
-        return any(
-            bool(getattr(group, "_operator_ids", ()))
-            for group in (
-                system_collection._feature_group_constrain_values,
-                system_collection._feature_group_constrain_rates,
-                system_collection._feature_group_synchronize,
-                system_collection._feature_group_damping,
-                system_collection._feature_group_callback,
-            )
+        step_states = tuple(
+            system.jax_kinematic_step(state, step_time, half_dt_jax)
+            for system, state in zip(systems, step_states)
+        )
+        step_time = step_time + half_dt_jax
+
+        step_states = system_collection.jax_constrain_values(step_states, step_time)
+
+        step_states = tuple(
+            system.jax_compute_internal_forces_and_torques(state, step_time)
+            for system, state in zip(systems, step_states)
         )
 
-    def _has_callbacks(self, system_collection) -> bool:  # type: ignore[no-untyped-def]
-        return bool(
-            getattr(system_collection._feature_group_callback, "_operator_ids", ())
+        step_states = system_collection.jax_synchronize(step_states, step_time)
+
+        step_states = tuple(
+            system.jax_dynamic_step(state, step_time, dt_jax)
+            for system, state in zip(systems, step_states)
         )
 
-    def _sync_systems_from_device(
-        self, systems: Iterable[object], attrs: Iterable[str] | None = None
-    ) -> None:
-        for system in systems:
-            if hasattr(system, "from_device"):
-                system.from_device(attrs=attrs)  # type: ignore[attr-defined]
+        step_states = system_collection.jax_constrain_rates(step_states, step_time)
 
-    def _sync_systems_to_device(
-        self, systems: Iterable[object], attrs: Iterable[str] | None = None
-    ) -> None:
-        for system in systems:
-            if hasattr(system, "to_device"):
-                system.to_device(attrs=attrs)  # type: ignore[attr-defined]
+        step_states = tuple(
+            system.jax_kinematic_step(state, step_time, half_dt_jax)
+            for system, state in zip(systems, step_states)
+        )
+        step_time = step_time + half_dt_jax
 
-    def step(
+        step_states = system_collection.jax_constrain_values(step_states, step_time)
+
+        step_states = tuple(
+            system.jax_zero_external_loads(state, step_time)
+            for system, state in zip(systems, step_states)
+        )
+
+        return step_time, step_states
+
+    def _get_compiled_rollout(
         self,
-        SystemCollection,
+        system_collection: JAXCompatibleSystems,
+        systems: tuple[JAXBlock, ...],
+        n_steps: int,
+    ):
+        cache_key = (id(system_collection), n_steps)
+        if cache_key in self._compiled_rollout_cache:
+            return self._compiled_rollout_cache[cache_key]
+
+        def rollout(
+            time_jax: jax.Array,
+            states: tuple[JAXPyTree, ...],
+            dt_jax: jax.Array,
+            half_dt_jax: jax.Array,
+        ) -> tuple[jax.Array, tuple[JAXPyTree, ...]]:
+            def body_fn(step_idx: int, carry):  # type: ignore[no-untyped-def]
+                return self._body_fn(
+                    step_idx,
+                    carry,
+                    systems=systems,
+                    system_collection=system_collection,
+                    dt_jax=dt_jax,
+                    half_dt_jax=half_dt_jax,
+                )
+
+            return jax.lax.fori_loop(
+                0,
+                n_steps,
+                body_fn,
+                (time_jax, states),
+            )
+
+        compiled_rollout = jax.jit(rollout)
+        self._compiled_rollout_cache[cache_key] = compiled_rollout
+        return compiled_rollout
+
+    @staticmethod
+    def _reference_device_from_states(
+        systems: tuple[JAXBlock, ...],
+        states: tuple[JAXPyTree, ...],
+    ) -> jax.Device:
+        first_system = systems[0]
+        if hasattr(first_system, "position_collection_device"):
+            return first_system.position_collection_device.device
+
+        for leaf in jax.tree_util.tree_leaves(states):
+            if hasattr(leaf, "devices"):
+                return next(iter(leaf.devices()))
+            if hasattr(leaf, "device"):
+                return leaf.device
+
+        return jax.devices()[0]
+
+    @staticmethod
+    def _reference_dtype_from_states(
+        states: tuple[JAXPyTree, ...],
+    ) -> np.dtype:
+        for leaf in jax.tree_util.tree_leaves(states):
+            if hasattr(leaf, "dtype"):
+                return np.dtype(leaf.dtype)
+        return np.dtype(np.float64)
+
+    def integrate(
+        self,
+        SystemCollection: JAXCompatibleSystems,
         time: np.float64 | float,
+        final_time: np.float64 | float,
         dt: np.float64 | float,
     ) -> np.float64:
-        if self._has_host_operators(SystemCollection) and not self.sync_host_operations:
-            raise RuntimeError(
-                "PositionVerletGPU encountered host-side operators. Re-run with "
-                "`sync_host_operations=True` for explicit host/device transfers, or port "
-                "those operators to the device path first."
-            )
+        """
+        Integrate Position Verlet steps from ``time`` to ``final_time`` with step ``dt``.
+        """
+        assert dt > 0.0, "dt must be positive."
+        assert final_time >= time, "final_time must be greater than or equal to time."
 
         simulation_time = np.float64(time)
+        target_time = np.float64(final_time)
         simulation_dt = np.float64(dt)
-        systems = tuple(SystemCollection.final_systems())
-
-        for kin_prefactor, kin_step, dyn_step in self.steps_and_prefactors[:-1]:
-            for system in systems:
-                kin_step(system, simulation_time, simulation_dt)
-
-            simulation_time += kin_prefactor(simulation_dt)
-
-            if self.sync_host_operations:
-                self._sync_systems_from_device(
-                    systems,
-                    attrs=(
-                        "position_collection",
-                        "director_collection",
-                        "velocity_collection",
-                        "omega_collection",
-                    ),
-                )
-            SystemCollection.constrain_values(simulation_time)
-            if self.sync_host_operations:
-                self._sync_systems_to_device(
-                    systems,
-                    attrs=("position_collection", "director_collection"),
-                )
-
-            for system in systems:
-                system.compute_internal_forces_and_torques(simulation_time)
-
-            if self.sync_host_operations:
-                self._sync_systems_from_device(
-                    systems,
-                    attrs=(
-                        "position_collection",
-                        "director_collection",
-                        "velocity_collection",
-                        "omega_collection",
-                        "external_forces",
-                        "external_torques",
-                    ),
-                )
-            SystemCollection.synchronize(simulation_time)
-            if self.sync_host_operations:
-                self._sync_systems_to_device(
-                    systems, attrs=("external_forces", "external_torques")
-                )
-
-            for system in systems:
-                dyn_step(system, simulation_time, simulation_dt)
-
-            if self.sync_host_operations:
-                self._sync_systems_from_device(
-                    systems,
-                    attrs=("velocity_collection", "omega_collection"),
-                )
-            SystemCollection.constrain_rates(simulation_time)
-            if self.sync_host_operations:
-                self._sync_systems_to_device(
-                    systems,
-                    attrs=(
-                        "velocity_collection",
-                        "omega_collection",
-                        "acceleration_collection",
-                        "alpha_collection",
-                    ),
-                )
-
-        last_kin_prefactor = self.steps_and_prefactors[-1][0]
-        last_kin_step = self.steps_and_prefactors[-1][1]
-
-        for system in systems:
-            last_kin_step(system, simulation_time, simulation_dt)
-        simulation_time += last_kin_prefactor(simulation_dt)
-
-        if self.sync_host_operations:
-            self._sync_systems_from_device(
-                systems,
-                attrs=("position_collection", "director_collection"),
-            )
-        SystemCollection.constrain_values(simulation_time)
-        if self.sync_host_operations:
-            self._sync_systems_to_device(
-                systems,
-                attrs=("position_collection", "director_collection"),
-            )
-
-        if self.sync_callbacks or (
-            self.sync_host_operations and self._has_callbacks(SystemCollection)
-        ):
-            self._sync_systems_from_device(systems)
-        SystemCollection.apply_callbacks(
-            simulation_time, round(simulation_time / simulation_dt)
+        duration = float(target_time - simulation_time)
+        n_steps = int(np.round(duration / float(simulation_dt)))
+        assert np.isclose(simulation_time + n_steps * simulation_dt, target_time), (
+            "final_time - time must be an integer multiple of dt."
         )
 
-        for system in systems:
-            system.zeroed_out_external_forces_and_torques(simulation_time)
-
-        return simulation_time
-
-    def run(
-        self,
-        SystemCollection,
-        time: np.float64 | float,
-        dt: np.float64 | float,
-        n_steps: int,
-    ) -> np.float64:
-        """
-        Execute multiple Position Verlet steps inside one device-side rollout.
-
-        This path is intended to replace user-side Python loops of the form::
-
-            for _ in range(n_steps):
-                time = stepper.step(sim, time, dt)
-
-        with a single JAX-backed call. The system collection must therefore be fully
-        device-compatible: no host operators, no host callbacks, and a single final
-        system exposing a ``jax_position_verlet_run(...)`` method.
-        """
-        if n_steps <= 0:
-            raise ValueError("n_steps must be positive.")
-
-        if self.sync_host_operations or self.sync_callbacks:
-            raise RuntimeError(
-                "PositionVerletGPU.run requires a fully device-side path. Disable "
-                "`sync_host_operations` and `sync_callbacks`, and port those phases "
-                "to JAX before using the rollout API."
-            )
-
-        if self._has_host_operators(SystemCollection):
-            raise RuntimeError(
-                "PositionVerletGPU.run encountered host-side operators. Port "
-                "constraints/forcing/contact/damping/callbacks to the device path "
-                "before using the JAX rollout API."
-            )
-
         systems = tuple(SystemCollection.final_systems())
-        if len(systems) != 1:
-            raise NotImplementedError(
-                "PositionVerletGPU.run currently supports exactly one final system."
-            )
-
-        system = systems[0]
-        rollout = getattr(system, "jax_position_verlet_run", None)
-        if rollout is None:
-            raise TypeError(
-                "Final system does not expose `jax_position_verlet_run(...)`, which "
-                "is required for device-side rollout."
-            )
-
-        final_time = rollout(
-            time=np.float64(time),
-            dt=np.float64(dt),
-            n_steps=int(n_steps),
+        states = tuple(system.jax_get_state() for system in systems)
+        reference_device = self._reference_device_from_states(systems, states)
+        reference_dtype = self._reference_dtype_from_states(states)
+        dt_jax = jax.device_put(
+            np.asarray(simulation_dt, dtype=reference_dtype),
+            device=reference_device,
         )
-        return np.float64(final_time)
+        half_dt_jax = jax.device_put(
+            np.asarray(0.5 * simulation_dt, dtype=reference_dtype),
+            device=reference_device,
+        )
+        time_jax = jax.device_put(
+            np.asarray(simulation_time, dtype=reference_dtype),
+            device=reference_device,
+        )
+        compiled_rollout = self._get_compiled_rollout(
+            system_collection=SystemCollection,
+            systems=systems,
+            n_steps=n_steps,
+        )
+        final_time_jax, final_states = compiled_rollout(
+            time_jax,
+            states,
+            dt_jax,
+            half_dt_jax,
+        )
+
+        for system, state in zip(systems, final_states):
+            system.jax_set_state(state)
+
+        return np.float64(final_time_jax)
