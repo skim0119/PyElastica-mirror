@@ -12,3 +12,4 @@ from .callbacks import CallBacks
 from .damping import Damping
 from .contact import Contact
 from .jax_ops import JAXOps
+from .jax_ops_block import JAXOpsBlock

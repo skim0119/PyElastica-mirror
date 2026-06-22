@@ -66,6 +66,7 @@ from elastica.modules.forcing import Forcing
 from elastica.modules.damping import Damping
 from elastica.modules.contact import Contact
 from elastica.modules.jax_ops import JAXOps
+from elastica.modules.jax_ops_block import JAXOpsBlock
 
 from elastica.transformations import inv_skew_symmetrize
 from elastica.transformations import rotate
@@ -95,4 +96,5 @@ from elastica.jax_operation import (
     AnalyticalLinearDamperJax,
     GravityAnalyticalDamperJax,
 )
+from elastica.jax_block_operation import NoBlockOpJax
 from elastica.restart import save_state, load_state
