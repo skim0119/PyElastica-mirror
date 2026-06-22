@@ -19,6 +19,11 @@ from dataclasses import dataclass
 import numpy as np
 
 import elastica as ea
+from elastica._jax_linalg import (
+    _jax_batch_matmul as _batch_matmul_3x3_jax,
+    _jax_batch_matvec as _batch_matvec_matrix_vector_jax,
+)
+from elastica._jax_rotations import _jax_get_rotation_matrix
 
 try:
     import jax
@@ -41,6 +46,31 @@ class BenchmarkResult:
         if self.accel_seconds is None:
             return 1.0
         return self.cpu_seconds / self.accel_seconds
+
+
+class BenchmarkCPUFullSimulator(
+    ea.BaseSystemCollection, ea.Forcing, ea.Damping
+):
+    pass
+
+
+class BenchmarkJAXSimulator(
+    ea.BaseSystemCollection, ea.JAXOps
+):
+    pass
+
+
+class _ConfiguredBenchmarkMemoryBlock(ea.MemoryBlockCosseratRodJax):
+    device_dtype = np.dtype(np.float64)
+    device = None
+
+    def __init__(self, systems, system_idx_list):
+        super().__init__(
+            systems,
+            system_idx_list,
+            device_dtype=self.device_dtype,
+            device=self.device,
+        )
 
 
 def build_rod(n_elems: int) -> ea.CosseratRod:
@@ -174,80 +204,6 @@ def _batch_matvec_matrix_vector_np(
     return out
 
 
-def _batch_matvec_matrix_vector_jax(
-    matrix_collection: jax.Array, vector_collection: jax.Array
-) -> jax.Array:
-    out = jnp.empty_like(vector_collection)
-    out = out.at[0, :].set(
-        matrix_collection[0, 0, :] * vector_collection[0, :]
-        + matrix_collection[0, 1, :] * vector_collection[1, :]
-        + matrix_collection[0, 2, :] * vector_collection[2, :]
-    )
-    out = out.at[1, :].set(
-        matrix_collection[1, 0, :] * vector_collection[0, :]
-        + matrix_collection[1, 1, :] * vector_collection[1, :]
-        + matrix_collection[1, 2, :] * vector_collection[2, :]
-    )
-    out = out.at[2, :].set(
-        matrix_collection[2, 0, :] * vector_collection[0, :]
-        + matrix_collection[2, 1, :] * vector_collection[1, :]
-        + matrix_collection[2, 2, :] * vector_collection[2, :]
-    )
-    return out
-
-
-def _batch_matmul_3x3_jax(
-    first_matrix_collection: jax.Array, second_matrix_collection: jax.Array
-) -> jax.Array:
-    out = jnp.empty_like(second_matrix_collection)
-    out = out.at[0, 0, :].set(
-        first_matrix_collection[0, 0, :] * second_matrix_collection[0, 0, :]
-        + first_matrix_collection[0, 1, :] * second_matrix_collection[1, 0, :]
-        + first_matrix_collection[0, 2, :] * second_matrix_collection[2, 0, :]
-    )
-    out = out.at[0, 1, :].set(
-        first_matrix_collection[0, 0, :] * second_matrix_collection[0, 1, :]
-        + first_matrix_collection[0, 1, :] * second_matrix_collection[1, 1, :]
-        + first_matrix_collection[0, 2, :] * second_matrix_collection[2, 1, :]
-    )
-    out = out.at[0, 2, :].set(
-        first_matrix_collection[0, 0, :] * second_matrix_collection[0, 2, :]
-        + first_matrix_collection[0, 1, :] * second_matrix_collection[1, 2, :]
-        + first_matrix_collection[0, 2, :] * second_matrix_collection[2, 2, :]
-    )
-    out = out.at[1, 0, :].set(
-        first_matrix_collection[1, 0, :] * second_matrix_collection[0, 0, :]
-        + first_matrix_collection[1, 1, :] * second_matrix_collection[1, 0, :]
-        + first_matrix_collection[1, 2, :] * second_matrix_collection[2, 0, :]
-    )
-    out = out.at[1, 1, :].set(
-        first_matrix_collection[1, 0, :] * second_matrix_collection[0, 1, :]
-        + first_matrix_collection[1, 1, :] * second_matrix_collection[1, 1, :]
-        + first_matrix_collection[1, 2, :] * second_matrix_collection[2, 1, :]
-    )
-    out = out.at[1, 2, :].set(
-        first_matrix_collection[1, 0, :] * second_matrix_collection[0, 2, :]
-        + first_matrix_collection[1, 1, :] * second_matrix_collection[1, 2, :]
-        + first_matrix_collection[1, 2, :] * second_matrix_collection[2, 2, :]
-    )
-    out = out.at[2, 0, :].set(
-        first_matrix_collection[2, 0, :] * second_matrix_collection[0, 0, :]
-        + first_matrix_collection[2, 1, :] * second_matrix_collection[1, 0, :]
-        + first_matrix_collection[2, 2, :] * second_matrix_collection[2, 0, :]
-    )
-    out = out.at[2, 1, :].set(
-        first_matrix_collection[2, 0, :] * second_matrix_collection[0, 1, :]
-        + first_matrix_collection[2, 1, :] * second_matrix_collection[1, 1, :]
-        + first_matrix_collection[2, 2, :] * second_matrix_collection[2, 1, :]
-    )
-    out = out.at[2, 2, :].set(
-        first_matrix_collection[2, 0, :] * second_matrix_collection[0, 2, :]
-        + first_matrix_collection[2, 1, :] * second_matrix_collection[1, 2, :]
-        + first_matrix_collection[2, 2, :] * second_matrix_collection[2, 2, :]
-    )
-    return out
-
-
 def _cpu_apply_external_loads(
     block: ea.MemoryBlockCosseratRod,
     *,
@@ -315,30 +271,38 @@ def gpu_loop(
 ) -> float:
     with jax.default_device(device):
         move_block_to_device(block, device)
-        block.allow_cpu_fallback = include_internal_forces
+        dt_device = _device_scalar(dt, dtype=block.device_dtype, device=device)
 
         for _ in range(warmup_runs):
             warmup_time = np.float64(0.0)
+            warmup_state = block.jax_get_state()
             for _ in range(n_steps):
                 if include_internal_forces:
-                    block.compute_internal_forces_and_torques(warmup_time)
-                block.update_accelerations(warmup_time, dt)
-                block.update_dynamics(warmup_time, dt)
-                block.update_kinematics(warmup_time, dt)
-                block.zeroed_out_external_forces_and_torques(warmup_time)
+                    warmup_state = block.jax_compute_internal_forces_and_torques(
+                        warmup_state, warmup_time
+                    )
+                warmup_state = block.jax_dynamic_step(
+                    warmup_state, warmup_time, dt_device
+                )
+                warmup_state = block.jax_kinematic_step(
+                    warmup_state, warmup_time, dt_device
+                )
+                warmup_state = block.jax_zero_external_loads(warmup_state, warmup_time)
                 warmup_time += dt
+            block.jax_set_state(warmup_state)
             jax.block_until_ready(block.position_collection_device)
 
         start = time.perf_counter()
         time_value = np.float64(0.0)
+        state = block.jax_get_state()
         for _ in range(n_steps):
             if include_internal_forces:
-                block.compute_internal_forces_and_torques(time_value)
-            block.update_accelerations(time_value, dt)
-            block.update_dynamics(time_value, dt)
-            block.update_kinematics(time_value, dt)
-            block.zeroed_out_external_forces_and_torques(time_value)
+                state = block.jax_compute_internal_forces_and_torques(state, time_value)
+            state = block.jax_dynamic_step(state, time_value, dt_device)
+            state = block.jax_kinematic_step(state, time_value, dt_device)
+            state = block.jax_zero_external_loads(state, time_value)
             time_value += dt
+        block.jax_set_state(state)
         jax.block_until_ready(block.position_collection_device)
         elapsed = time.perf_counter() - start
 
@@ -382,34 +346,7 @@ def _jax_update_kinematics(
     omega_collection: jax.Array,
     prefac: float,
 ) -> tuple[jax.Array, jax.Array]:
-    axis_collection = prefac * omega_collection
-    theta = jnp.sqrt(
-        axis_collection[0] * axis_collection[0]
-        + axis_collection[1] * axis_collection[1]
-        + axis_collection[2] * axis_collection[2]
-    )
-    theta_eps = theta + jnp.asarray(1.0e-14, dtype=axis_collection.dtype)
-    v0 = axis_collection[0] / theta_eps
-    v1 = axis_collection[1] / theta_eps
-    v2 = axis_collection[2] / theta_eps
-    sin_theta = jnp.sin(theta)
-    one_minus_cos_theta = 1.0 - jnp.cos(theta)
-
-    rot = jnp.stack(
-        (
-            1.0 - one_minus_cos_theta * (v1 * v1 + v2 * v2),
-            sin_theta * v2 + one_minus_cos_theta * v0 * v1,
-            -sin_theta * v1 + one_minus_cos_theta * v0 * v2,
-            -sin_theta * v2 + one_minus_cos_theta * v0 * v1,
-            1.0 - one_minus_cos_theta * (v0 * v0 + v2 * v2),
-            sin_theta * v0 + one_minus_cos_theta * v1 * v2,
-            sin_theta * v1 + one_minus_cos_theta * v0 * v2,
-            -sin_theta * v0 + one_minus_cos_theta * v1 * v2,
-            1.0 - one_minus_cos_theta * (v0 * v0 + v1 * v1),
-        ),
-        axis=0,
-    ).reshape(3, 3, omega_collection.shape[1])
-
+    rot = _jax_get_rotation_matrix(prefac, omega_collection)
     position_collection = position_collection + prefac * velocity_collection
     director_collection = _batch_matmul_3x3_jax(rot, director_collection)
     return position_collection, director_collection
@@ -444,180 +381,111 @@ def _jax_update_dynamics(
     )
 
 
+def build_cpu_full_sim(
+    n_elems: int,
+    dt: np.float64,
+    *,
+    gravity: np.ndarray,
+    uniform_damping_constant: float,
+) -> tuple[BenchmarkCPUFullSimulator, ea.CosseratRod]:
+    sim = BenchmarkCPUFullSimulator()
+    rod = build_rod(n_elems)
+    sim.append(rod)
+    sim.add_forcing_to(rod).using(ea.GravityForces, acc_gravity=gravity)
+    sim.dampen(rod).using(
+        ea.AnalyticalLinearDamper,
+        uniform_damping_constant=uniform_damping_constant,
+        time_step=dt,
+    )
+    sim.finalize()
+    return sim, rod
+
+
 def cpu_full_rollout_loop(
-    block: ea.MemoryBlockCosseratRod,
+    n_elems: int,
     n_steps: int,
     dt: np.float64,
     *,
     gravity: np.ndarray,
-    spring_anchor: np.ndarray,
-    spring_constant: float,
-    spring_damping: float,
-    torque_vector: np.ndarray,
+    uniform_damping_constant: float,
     warmup_runs: int,
 ) -> float:
-    half_dt = np.float64(0.5 * dt)
-    for _ in range(warmup_runs):
-        time_value = np.float64(0.0)
-        for _ in range(n_steps):
-            block.update_kinematics(time_value, half_dt)
-            _cpu_apply_external_loads(
-                block,
-                gravity=gravity,
-                spring_anchor=spring_anchor,
-                spring_constant=spring_constant,
-                spring_damping=spring_damping,
-                torque_vector=torque_vector,
-            )
-            block.update_accelerations(time_value, dt)
-            block.update_dynamics(time_value, dt)
-            block.update_kinematics(time_value, half_dt)
-            block.zeroed_out_external_forces_and_torques(time_value)
-            time_value += dt
+    stepper = ea.PositionVerlet()
 
+    for _ in range(warmup_runs):
+        sim, _ = build_cpu_full_sim(
+            n_elems,
+            dt,
+            gravity=gravity,
+            uniform_damping_constant=uniform_damping_constant,
+        )
+        warmup_time = np.float64(0.0)
+        for _ in range(n_steps):
+            warmup_time = stepper.step(sim, warmup_time, dt)
+
+    sim, _ = build_cpu_full_sim(
+        n_elems,
+        dt,
+        gravity=gravity,
+        uniform_damping_constant=uniform_damping_constant,
+    )
     start = time.perf_counter()
     time_value = np.float64(0.0)
     for _ in range(n_steps):
-        block.update_kinematics(time_value, half_dt)
-        _cpu_apply_external_loads(
-            block,
-            gravity=gravity,
-            spring_anchor=spring_anchor,
-            spring_constant=spring_constant,
-            spring_damping=spring_damping,
-            torque_vector=torque_vector,
-        )
-        block.update_accelerations(time_value, dt)
-        block.update_dynamics(time_value, dt)
-        block.update_kinematics(time_value, half_dt)
-        block.zeroed_out_external_forces_and_torques(time_value)
-        time_value += dt
+        time_value = stepper.step(sim, time_value, dt)
     return time.perf_counter() - start
 
 
 def gpu_full_rollout_loop(
-    block: ea.MemoryBlockCosseratRodJax,
+    n_elems: int,
     n_steps: int,
     dt: np.float64,
     *,
     gravity: np.ndarray,
-    spring_anchor: np.ndarray,
-    spring_constant: float,
-    spring_damping: float,
-    torque_vector: np.ndarray,
+    uniform_damping_constant: float,
     device: jax.Device,
     warmup_runs: int,
+    device_dtype: np.dtype,
 ) -> float:
-    with jax.default_device(device):
-        move_block_to_device(block, device)
-        initial_state = {
-            "position_collection": block.position_collection_device,
-            "director_collection": block.director_collection_device,
-            "velocity_collection": block.velocity_collection_device,
-            "omega_collection": block.omega_collection_device,
-        }
-        constants = {
-            "mass": block._device_state["mass"],
-            "inv_mass_second_moment_of_inertia": block._device_state[
-                "inv_mass_second_moment_of_inertia"
-            ],
-            "dilatation": block._device_state["dilatation"],
-            "gravity": _device_array(
-                gravity,
-                dtype=block.device_dtype,
-                device=device,
-            ),
-            "spring_anchor": _device_array(
-                spring_anchor,
-                dtype=block.device_dtype,
-                device=device,
-            ),
-            "torque_vector": _device_array(
-                torque_vector,
-                dtype=block.device_dtype,
-                device=device,
-            ),
-        }
-        half_dt = _device_scalar(0.5 * dt, dtype=block.device_dtype, device=device)
-        full_dt = _device_scalar(dt, dtype=block.device_dtype, device=device)
-        spring_constant = _device_scalar(
-            spring_constant, dtype=block.device_dtype, device=device
-        )
-        spring_damping = _device_scalar(
-            spring_damping, dtype=block.device_dtype, device=device
-        )
+    _ConfiguredBenchmarkMemoryBlock.device = device
+    _ConfiguredBenchmarkMemoryBlock.device_dtype = np.dtype(device_dtype)
+    stepper = ea.PositionVerletGPU()
 
-    def step_fn(state):
-        position_collection, director_collection = _jax_update_kinematics(
-            state["position_collection"],
-            state["director_collection"],
-            state["velocity_collection"],
-            state["omega_collection"],
-            half_dt,
+    def build_sim():
+        sim = BenchmarkJAXSimulator()
+        sim.enable_block_supports(ea.CosseratRod, _ConfiguredBenchmarkMemoryBlock)
+        rod = build_rod(n_elems)
+        sim.append(rod)
+        sim.using(rod).operate(
+            ea.GravityAnalyticalDamperJax,
+            acc_gravity=gravity,
+            uniform_damping_constant=uniform_damping_constant,
+            time_step=dt,
         )
-        external_forces, external_torques = _jax_apply_external_loads(
-            position_collection,
-            state["velocity_collection"],
-            director_collection,
-            constants["mass"],
-            constants["gravity"],
-            constants["spring_anchor"],
-            spring_constant,
-            spring_damping,
-            constants["torque_vector"],
+        sim.finalize()
+        block = tuple(sim.final_systems())[0]
+        return sim, block
+
+    for _ in range(warmup_runs):
+        warm_sim, warm_block = build_sim()
+        stepper.integrate(
+            warm_sim,
+            time=np.float64(0.0),
+            final_time=np.float64(n_steps * dt),
+            dt=dt,
         )
-        acceleration_collection, alpha_collection = _jax_update_accelerations(
-            external_forces,
-            constants["mass"],
-            external_torques,
-            constants["inv_mass_second_moment_of_inertia"],
-            constants["dilatation"],
-        )
-        velocity_collection, omega_collection = _jax_update_dynamics(
-            state["velocity_collection"],
-            state["omega_collection"],
-            acceleration_collection,
-            alpha_collection,
-            full_dt,
-        )
-        position_collection, director_collection = _jax_update_kinematics(
-            position_collection,
-            director_collection,
-            velocity_collection,
-            omega_collection,
-            half_dt,
-        )
-        return {
-            "position_collection": position_collection,
-            "director_collection": director_collection,
-            "velocity_collection": velocity_collection,
-            "omega_collection": omega_collection,
-        }
+        jax.block_until_ready(warm_block.position_collection_device)
 
-    with jax.default_device(device):
-        @jax.jit
-        def rollout(state):
-            def body_fn(_, body_state):
-                return step_fn(body_state)
-
-            return jax.lax.fori_loop(0, n_steps, body_fn, state)
-
-        for _ in range(warmup_runs):
-            warm_state = rollout(initial_state)
-            jax.block_until_ready(warm_state["position_collection"])
-
-        start = time.perf_counter()
-        final_state = rollout(initial_state)
-        jax.block_until_ready(final_state["position_collection"])
-        elapsed = time.perf_counter() - start
-
-        block._device_state["position_collection"] = final_state["position_collection"]
-        block._device_state["director_collection"] = final_state["director_collection"]
-        block._device_state["velocity_collection"] = final_state["velocity_collection"]
-        block._device_state["omega_collection"] = final_state["omega_collection"]
-        block._refresh_device_views()
-        block.from_device(attrs=("position_collection", "velocity_collection"))
-        return elapsed
+    timed_sim, timed_block = build_sim()
+    start = time.perf_counter()
+    stepper.integrate(
+        timed_sim,
+        time=np.float64(0.0),
+        final_time=np.float64(n_steps * dt),
+        dt=dt,
+    )
+    jax.block_until_ready(timed_block.position_collection_device)
+    return time.perf_counter() - start
 
 
 def benchmark_mode(
@@ -663,41 +531,31 @@ def benchmark_full_jax_rollout(
     dt: np.float64,
     *,
     gravity: np.ndarray,
-    spring_anchor: np.ndarray,
-    spring_constant: float,
-    spring_damping: float,
-    torque_vector: np.ndarray,
+    uniform_damping_constant: float,
     warmup_runs: int,
     device_dtype: np.dtype,
 ) -> BenchmarkResult:
-    cpu_block = build_cpu_block(n_elems)
     cpu_seconds = cpu_full_rollout_loop(
-        cpu_block,
+        n_elems,
         n_steps,
         dt,
         gravity=gravity,
-        spring_anchor=spring_anchor,
-        spring_constant=spring_constant,
-        spring_damping=spring_damping,
-        torque_vector=torque_vector,
+        uniform_damping_constant=uniform_damping_constant,
         warmup_runs=warmup_runs,
     )
     if backend == "numba":
         return BenchmarkResult(backend, cpu_seconds, None)
 
     assert device is not None
-    gpu_block = build_gpu_block(n_elems, device_dtype=device_dtype, device=device)
     accel_seconds = gpu_full_rollout_loop(
-        gpu_block,
+        n_elems,
         n_steps,
         dt,
         gravity=gravity,
-        spring_anchor=spring_anchor,
-        spring_constant=spring_constant,
-        spring_damping=spring_damping,
-        torque_vector=torque_vector,
+        uniform_damping_constant=uniform_damping_constant,
         device=device,
         warmup_runs=warmup_runs,
+        device_dtype=device_dtype,
     )
     return BenchmarkResult(backend, cpu_seconds, accel_seconds)
 
@@ -768,22 +626,10 @@ def parse_args() -> argparse.Namespace:
         help="Gravity acceleration applied in the y direction for the full JAX rollout.",
     )
     parser.add_argument(
-        "--spring-k",
-        type=float,
-        default=5.0e3,
-        help="Linear spring constant applied at the rod tip in the full JAX rollout.",
-    )
-    parser.add_argument(
-        "--spring-nu",
+        "--uniform-damping-constant",
         type=float,
         default=5.0,
-        help="Linear spring damping coefficient applied at the rod tip.",
-    )
-    parser.add_argument(
-        "--torque",
-        type=float,
-        default=1.0e-2,
-        help="Distributed torque magnitude applied about +z in the full JAX rollout.",
+        help="Uniform analytical damping constant used in the full-rollout case.",
     )
     return parser.parse_args()
 
@@ -795,8 +641,6 @@ def main() -> None:
     device_dtype = np.dtype(args.device_dtype)
     scalar_dtype = np.float64 if args.device_dtype == "float64" else np.float32
     gravity = np.array([0.0, args.gravity, 0.0], dtype=scalar_dtype)
-    spring_anchor = np.array([0.0, 0.0, 1.0], dtype=scalar_dtype)
-    torque_vector = np.array([0.0, 0.0, args.torque], dtype=scalar_dtype)
     requested_backends = [
         platform
         for platform, enabled in (
@@ -856,10 +700,7 @@ def main() -> None:
                     args.n_steps,
                     scalar_dtype(args.dt),
                     gravity=gravity,
-                    spring_anchor=spring_anchor,
-                    spring_constant=args.spring_k,
-                    spring_damping=args.spring_nu,
-                    torque_vector=torque_vector,
+                    uniform_damping_constant=args.uniform_damping_constant,
                     warmup_runs=args.warmup_runs,
                     device_dtype=device_dtype,
                 )
