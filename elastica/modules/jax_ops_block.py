@@ -41,7 +41,9 @@ _BLOCK_STAGE_METHODS = (
 
 
 class _PerRodStateView:
-    def __init__(self, state: dict[str, Any], *, updates: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, state: dict[str, Any], *, updates: dict[str, Any] | None = None
+    ) -> None:
         object.__setattr__(self, "_state", state)
         object.__setattr__(self, "_updates", {} if updates is None else dict(updates))
 
@@ -136,9 +138,9 @@ class JAXOpsBlock(SystemCollectionProtocol):
         end_idx: np.ndarray,
     ) -> np.ndarray:
         widths = end_idx - start_idx
-        assert np.all(widths == widths[0]), (
-            "Per-rod JAX block operators require uniform discretization across rods."
-        )
+        assert np.all(
+            widths == widths[0]
+        ), "Per-rod JAX block operators require uniform discretization across rods."
         offsets = np.arange(int(widths[0]), dtype=np.int32)
         return start_idx[:, None].astype(np.int32) + offsets[None, :]
 
@@ -179,7 +181,9 @@ class JAXOpsBlock(SystemCollectionProtocol):
         raise ValueError(f"Unsupported array rank {array.ndim} for per-rod batching.")
 
     @staticmethod
-    def _scatter_attr(array: jax.Array, indices: jax.Array, values: jax.Array) -> jax.Array:
+    def _scatter_attr(
+        array: jax.Array, indices: jax.Array, values: jax.Array
+    ) -> jax.Array:
         if array.ndim == 1:
             return array.at[indices].set(values)
         if array.ndim == 2:
@@ -197,16 +201,11 @@ class JAXOpsBlock(SystemCollectionProtocol):
         operator: Any,
     ):
         indices = cls._per_rod_indices(block_system)
-        attr_domains = {
-            attr: "node"
-            for attr in _NODE_ATTRS
-        } | {
-            attr: "element"
-            for attr in _ELEMENT_ATTRS
-        } | {
-            attr: "voronoi"
-            for attr in _VORONOI_ATTRS
-        }
+        attr_domains = (
+            {attr: "node" for attr in _NODE_ATTRS}
+            | {attr: "element" for attr in _ELEMENT_ATTRS}
+            | {attr: "voronoi" for attr in _VORONOI_ATTRS}
+        )
         attrs = tuple(_SYNCABLE_ATTRS)
 
         def apply(*, states, time):  # type: ignore[no-untyped-def]
@@ -250,7 +249,12 @@ class JAXOpsBlock(SystemCollectionProtocol):
             staged_wrappers = []
             instantiate_with_block = False
             instantiate_with_representative_rod = False
-            for stage, block_method_name, per_rod_method_name, legacy_method_name in _BLOCK_STAGE_METHODS:
+            for (
+                stage,
+                block_method_name,
+                per_rod_method_name,
+                legacy_method_name,
+            ) in _BLOCK_STAGE_METHODS:
                 op_cls = jax_op.operator_cls()
                 has_block = hasattr(op_cls, block_method_name) and getattr(
                     op_cls, block_method_name
@@ -262,9 +266,7 @@ class JAXOpsBlock(SystemCollectionProtocol):
                     op_cls, legacy_method_name
                 ) is not getattr(NoOpsJax, legacy_method_name)
 
-                assert not (
-                    has_block and (has_per_rod or has_legacy)
-                ), (
+                assert not (has_block and (has_per_rod or has_legacy)), (
                     f"{op_cls} mixes block and per-rod JAX block operator "
                     f"implementations for stage {stage!r}. Choose one style per stage."
                 )
@@ -293,13 +295,20 @@ class JAXOpsBlock(SystemCollectionProtocol):
                 instantiate_target = block_system._systems[0]
             op_instance = jax_op.instantiate(instantiate_target)
 
-            for stage, block_method_name, per_rod_method_name, legacy_method_name in _BLOCK_STAGE_METHODS:
+            for (
+                stage,
+                block_method_name,
+                per_rod_method_name,
+                legacy_method_name,
+            ) in _BLOCK_STAGE_METHODS:
                 has_block = hasattr(type(op_instance), block_method_name) and getattr(
                     type(op_instance), block_method_name
                 ) is not getattr(NoBlockOpJax, block_method_name)
-                has_per_rod = hasattr(type(op_instance), per_rod_method_name) and getattr(
+                has_per_rod = hasattr(
                     type(op_instance), per_rod_method_name
-                ) is not getattr(NoBlockOpJax, per_rod_method_name)
+                ) and getattr(type(op_instance), per_rod_method_name) is not getattr(
+                    NoBlockOpJax, per_rod_method_name
+                )
                 has_legacy = hasattr(type(op_instance), legacy_method_name) and getattr(
                     type(op_instance), legacy_method_name
                 ) is not getattr(NoOpsJax, legacy_method_name)
@@ -313,7 +322,9 @@ class JAXOpsBlock(SystemCollectionProtocol):
                     continue
 
                 if has_per_rod or has_legacy:
-                    method_name = per_rod_method_name if has_per_rod else legacy_method_name
+                    method_name = (
+                        per_rod_method_name if has_per_rod else legacy_method_name
+                    )
                     wrapped = self._wrap_jax_per_rod_operator(
                         block_state_idx=block_state_idx,
                         block_system=block_system,
@@ -374,9 +385,7 @@ class _JAXBlockOp:
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        assert issubclass(
-            cls, (NoBlockOpJax, NoOpsJax)
-        ), (
+        assert issubclass(cls, (NoBlockOpJax, NoOpsJax)), (
             f"{cls} is not a valid JAX block operator. It must derive from "
             "NoBlockOpJax or NoOpsJax."
         )

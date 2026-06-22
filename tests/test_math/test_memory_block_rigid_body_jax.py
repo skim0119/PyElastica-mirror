@@ -84,9 +84,15 @@ def test_memory_block_rigid_body_jax_does_not_alias_original_bodies():
     rigid_body = MockRigidBody()
     block = _make_block(rigid_body)
 
-    assert not np.shares_memory(block.position_collection, rigid_body.position_collection)
-    assert not np.shares_memory(block.velocity_collection, rigid_body.velocity_collection)
-    assert not np.shares_memory(block.director_collection, rigid_body.director_collection)
+    assert not np.shares_memory(
+        block.position_collection, rigid_body.position_collection
+    )
+    assert not np.shares_memory(
+        block.velocity_collection, rigid_body.velocity_collection
+    )
+    assert not np.shares_memory(
+        block.director_collection, rigid_body.director_collection
+    )
 
 
 def test_memory_block_rigid_body_jax_to_device_raises_after_initialization():

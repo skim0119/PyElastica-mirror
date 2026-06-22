@@ -52,28 +52,40 @@ def test_block_snake_ops_match_single_rod_sequence() -> None:
     static_mu = np.zeros(3, dtype=np.float64)
     time = np.float64(0.3)
 
-    rod_state = SnakeMuscleTorquesJax(
-        b_coeff=b_coeff,
-        period=2.0,
-        base_length=0.35,
-        gravitational_acc=-9.80665,
-        _system=rod,
-    ).jax_operate_synchronize(JAXRodView(base_state, metadata), time).commit()
-    rod_state = SnakePlaneContactJax(
-        plane_origin=np.array([0.0, -0.35 * 0.011, 0.0], dtype=np.float64),
-        plane_normal=np.array([0.0, 1.0, 0.0], dtype=np.float64),
-        slip_velocity_tol=1.0e-8,
-        k=1.0,
-        nu=1.0e-6,
-        kinetic_mu_array=kinetic_mu,
-        static_mu_array=static_mu,
-        _system=rod,
-    ).jax_operate_synchronize(JAXRodView(rod_state, metadata), time).commit()
-    rod_state = ea.AnalyticalLinearDamperJax(
-        time_step=np.float64(1.0e-4),
-        damping_constant=2.0e-3,
-        _system=rod,
-    ).jax_operate_constrain_rates(JAXRodView(rod_state, metadata), time).commit()
+    rod_state = (
+        SnakeMuscleTorquesJax(
+            b_coeff=b_coeff,
+            period=2.0,
+            base_length=0.35,
+            gravitational_acc=-9.80665,
+            _system=rod,
+        )
+        .jax_operate_synchronize(JAXRodView(base_state, metadata), time)
+        .commit()
+    )
+    rod_state = (
+        SnakePlaneContactJax(
+            plane_origin=np.array([0.0, -0.35 * 0.011, 0.0], dtype=np.float64),
+            plane_normal=np.array([0.0, 1.0, 0.0], dtype=np.float64),
+            slip_velocity_tol=1.0e-8,
+            k=1.0,
+            nu=1.0e-6,
+            kinetic_mu_array=kinetic_mu,
+            static_mu_array=static_mu,
+            _system=rod,
+        )
+        .jax_operate_synchronize(JAXRodView(rod_state, metadata), time)
+        .commit()
+    )
+    rod_state = (
+        ea.AnalyticalLinearDamperJax(
+            time_step=np.float64(1.0e-4),
+            damping_constant=2.0e-3,
+            _system=rod,
+        )
+        .jax_operate_constrain_rates(JAXRodView(rod_state, metadata), time)
+        .commit()
+    )
 
     block_state = SnakeMuscleTorquesBlockJax(
         b_coeff=b_coeff,

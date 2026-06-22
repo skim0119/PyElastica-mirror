@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable, Literal, Sequence
 
 import numpy as np
@@ -38,6 +39,52 @@ _MATRIX_ATTRS: tuple[str, ...] = (
     "inv_mass_second_moment_of_inertia",
 )
 _SYNCABLE_ATTRS: tuple[str, ...] = _SCALAR_ATTRS + _VECTOR_ATTRS + _MATRIX_ATTRS
+
+
+@dataclass(frozen=True)
+class JAXRigidBodyViewMetadata:
+    block_state_idx: int
+    body_slice: slice
+
+    def slice_for_attr(self, attr: str) -> slice:
+        if attr in _SYNCABLE_ATTRS:
+            return self.body_slice
+        raise AttributeError(f"Unsupported rigid-body-view attribute {attr!r}")
+
+
+class JAXRigidBodyView:
+    """Rigid-body-local facade over explicit block state for JAX operator kernels."""
+
+    def __init__(
+        self,
+        state: dict[str, object],
+        metadata: JAXRigidBodyViewMetadata,
+        *,
+        updates: dict[str, object] | None = None,
+    ) -> None:
+        object.__setattr__(self, "_state", state)
+        object.__setattr__(self, "_metadata", metadata)
+        object.__setattr__(self, "_updates", {} if updates is None else dict(updates))
+
+    def __getattr__(self, attr: str) -> object:
+        if attr.startswith("_"):
+            raise AttributeError(attr)
+        source = self._updates.get(attr, self._state[attr])
+        attr_slice = self._metadata.slice_for_attr(attr)
+        return source[..., attr_slice]
+
+    def __setattr__(self, attr: str, value: object) -> None:
+        if attr.startswith("_"):
+            object.__setattr__(self, attr, value)
+            return
+        base = self._updates.get(attr, self._state[attr])
+        attr_slice = self._metadata.slice_for_attr(attr)
+        self._updates[attr] = base.at[..., attr_slice].set(value)
+
+    def commit(self) -> dict[str, object]:
+        updated = dict(self._state)
+        updated.update(self._updates)
+        return updated
 
 
 @jax.jit
@@ -238,9 +285,9 @@ class MemoryBlockRigidBodyJax(RigidBodyBase, _RigidRodSymplecticStepperMixin):
         elif value_type == "vector":
             view_shape = (3, self.n_elems)
         else:
-            assert value_type == "tensor", (
-                "value_type must be one of 'scalar', 'vector', or 'tensor'."
-            )
+            assert (
+                value_type == "tensor"
+            ), "value_type must be one of 'scalar', 'vector', or 'tensor'."
             view_shape = (3, 3, self.n_elems)
 
         for attr_name, row_idx in mapping_dict.items():
