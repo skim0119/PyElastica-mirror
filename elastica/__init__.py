@@ -67,6 +67,8 @@ from elastica.modules.damping import Damping
 from elastica.modules.contact import Contact
 from elastica.modules.jax_ops import JAXOps
 from elastica.modules.jax_ops_block import JAXOpsBlock
+from elastica.modules.jax_ops_rod_rod_block import JAXRodRodBlockOps
+from elastica.modules.jax_ops_rod_rigid_body import JAXOpsRodRigidBody
 
 from elastica.transformations import inv_skew_symmetrize
 from elastica.transformations import rotate
@@ -98,4 +100,9 @@ from elastica.jax_operation import (
     GravityAnalyticalDamperJax,
 )
 from elastica.jax_block_operation import NoBlockOpJax
+from elastica.jax_rod2rod_block_operation import (
+    JAXRodRodBlockMetadata,
+    NoRodRodBlockOpJax,
+)
+from elastica.jax_rod_rigid_body_operation import NoRodRigidBodyJax
 from elastica.restart import save_state, load_state
