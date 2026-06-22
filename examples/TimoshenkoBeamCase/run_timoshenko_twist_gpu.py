@@ -280,7 +280,9 @@ def _collect_block_state(block: ea.MemoryBlockCosseratRodJax) -> dict[str, np.nd
     )
     return {
         "position_collection": np.asarray(state["position_collection"])[:, node_slice],
-        "director_collection": np.asarray(state["director_collection"])[:, :, elem_slice],
+        "director_collection": np.asarray(state["director_collection"])[
+            :, :, elem_slice
+        ],
         "velocity_collection": np.asarray(state["velocity_collection"])[:, node_slice],
         "omega_collection": np.asarray(state["omega_collection"])[:, elem_slice],
         "sigma": np.asarray(state["sigma"])[:, elem_slice],
@@ -298,13 +300,15 @@ def run_cpu_reference(*, final_time: float, n_elem: int = 80):
     for _ in range(total_steps):
         time_value = stepper.step(sim, time_value, np.float64(dt))
     elapsed = time.perf_counter() - start
-    assert np.isclose(time_value, snapped_final_time), (
-        "CPU timoshenko twist rollout did not end on the expected time grid."
-    )
+    assert np.isclose(
+        time_value, snapped_final_time
+    ), "CPU timoshenko twist rollout did not end on the expected time grid."
     return _collect_cpu_state(rod), elapsed, dt
 
 
-def run_jax_rollout(*, device: jax.Device, device_dtype: np.dtype, final_time: float, n_elem: int = 80):
+def run_jax_rollout(
+    *, device: jax.Device, device_dtype: np.dtype, final_time: float, n_elem: int = 80
+):
     sim, block, dt = build_jax_sim(
         device=device,
         device_dtype=device_dtype,
@@ -341,7 +345,9 @@ def max_abs_diff(first: np.ndarray, second: np.ndarray) -> float:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=("auto", "cpu", "cuda", "mps"), default="auto")
+    parser.add_argument(
+        "--backend", choices=("auto", "cpu", "cuda", "mps"), default="auto"
+    )
     parser.add_argument("--n-elem", type=int, default=80)
     parser.add_argument("--final-time", type=float, default=6.0)
     return parser.parse_args()

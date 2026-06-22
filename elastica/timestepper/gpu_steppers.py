@@ -220,9 +220,9 @@ class PositionVerletGPU:
         simulation_dt = np.float64(dt)
         duration = float(target_time - simulation_time)
         n_steps = int(np.round(duration / float(simulation_dt)))
-        assert np.isclose(simulation_time + n_steps * simulation_dt, target_time), (
-            "final_time - time must be an integer multiple of dt."
-        )
+        assert np.isclose(
+            simulation_time + n_steps * simulation_dt, target_time
+        ), "final_time - time must be an integer multiple of dt."
 
         systems = tuple(SystemCollection.final_systems())
         states = tuple(system.jax_get_state() for system in systems)

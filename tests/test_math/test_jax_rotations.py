@@ -67,7 +67,9 @@ def test_jax_get_rotation_matrix_correct_rotation_about_z(zcomp, dt):
     vector_collection = np.array([0.0, 0.0, zcomp]).reshape(-1, 1)
     with jax.default_device(CPU_DEVICE):
         test_rot_mat = np.asarray(
-            _jax_get_rotation_matrix(dt, jax.numpy.asarray(vector_collection, dtype=np.float64))
+            _jax_get_rotation_matrix(
+                dt, jax.numpy.asarray(vector_collection, dtype=np.float64)
+            )
         )
     test_theta = zcomp * dt
     correct_rot_mat = np.array(
@@ -152,7 +154,9 @@ def test_jax_get_rotation_matrix_gives_orthonormal_matrices(rng):
         rot_mat = np.asarray(
             _jax_get_rotation_matrix(
                 dt,
-                jax.numpy.asarray(rng.standard_normal((dim, blocksize)), dtype=np.float64),
+                jax.numpy.asarray(
+                    rng.standard_normal((dim, blocksize)), dtype=np.float64
+                ),
             )
         )
 
@@ -172,7 +176,9 @@ def test_jax_get_rotation_matrix_gives_unit_determinant(rng):
         test_rot_mat_collection = np.asarray(
             _jax_get_rotation_matrix(
                 dt,
-                jax.numpy.asarray(rng.standard_normal((dim, blocksize)), dtype=np.float64),
+                jax.numpy.asarray(
+                    rng.standard_normal((dim, blocksize)), dtype=np.float64
+                ),
             )
         )
     test_det_collection = np.linalg.det(test_rot_mat_collection.T)
@@ -206,7 +212,9 @@ def test_jax_inv_rotate_correctness_simple_in_three_dimensions():
     correct_axis_collection = np.ones((3, 1)) / np.sqrt(3.0)
     with jax.default_device(CPU_DEVICE):
         test_axis_collection = np.asarray(
-            _jax_inv_rotate(jax.numpy.asarray(input_director_collection, dtype=np.float64))
+            _jax_inv_rotate(
+                jax.numpy.asarray(input_director_collection, dtype=np.float64)
+            )
         ).copy()
 
     correct_angle = np.deg2rad(120)
@@ -233,9 +241,9 @@ def test_jax_inv_rotate_matches_numba_across_random_inputs(rng):
     correct_axis_collection = _inv_rotate(director_collection)
     with jax.default_device(CPU_DEVICE):
         test_axis_collection = np.asarray(
-            _jax_inv_rotate(
-                jax.numpy.asarray(director_collection, dtype=np.float64)
-            )
+            _jax_inv_rotate(jax.numpy.asarray(director_collection, dtype=np.float64))
         )
 
-    assert_allclose(test_axis_collection, correct_axis_collection, atol=Tolerance.atol())
+    assert_allclose(
+        test_axis_collection, correct_axis_collection, atol=Tolerance.atol()
+    )
