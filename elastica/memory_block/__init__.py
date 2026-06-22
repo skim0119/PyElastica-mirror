@@ -1,2 +1,3 @@
 from .memory_block_rigid_body import MemoryBlockRigidBody
+from .memory_block_rigid_body_jax import MemoryBlockRigidBodyJax
 from .memory_block_rod import MemoryBlockCosseratRod

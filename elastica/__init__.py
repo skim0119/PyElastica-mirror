@@ -87,6 +87,7 @@ from elastica.timestepper import (
 from elastica.timestepper.symplectic_steppers import PositionVerlet, PEFRL
 from elastica.timestepper.gpu_steppers import PositionVerletGPU
 from elastica.memory_block.memory_block_rigid_body import MemoryBlockRigidBody
+from elastica.memory_block.memory_block_rigid_body_jax import MemoryBlockRigidBodyJax
 from elastica.memory_block.memory_block_rod import MemoryBlockCosseratRod
 from elastica.memory_block.memory_block_rod_jax import MemoryBlockCosseratRodJax
 from elastica.jax_operation import (
