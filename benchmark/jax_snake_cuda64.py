@@ -312,6 +312,11 @@ def main() -> None:
     if dtype == np.dtype(np.float64) and device.platform == "mps":
         raise SystemExit("MPS/MLX does not support float64. Use CPU/CUDA or float32.")
 
+    total_steps = int(args.final_time / args.time_step)
+    assert total_steps > 0, "final-time / time-step must yield at least one step."
+    snapped_final_time = total_steps * args.time_step
+    backend_label = "jax-cpu" if device.platform == "cpu" else f"jax-{device.platform}"
+
     cpu_sim, cpu_rods = _build_cpu_sim(
         n_snakes=args.n_snakes,
         n_elem=args.n_elem,
@@ -323,8 +328,6 @@ def main() -> None:
         gravitational_acc=-9.80665,
         time_step=args.time_step,
     )
-    total_steps = int(args.final_time / args.time_step)
-    snapped_final_time = total_steps * args.time_step
     cpu_stepper = ea.PositionVerlet()
 
     time_value = np.float64(0.0)
@@ -380,10 +383,10 @@ def main() -> None:
     print(f"n_snakes: {args.n_snakes}")
     print(f"n_elem: {args.n_elem}")
     print(f"steps: {total_steps}")
-    print(f"cpu_seconds: {cpu_elapsed:.6f}")
-    print(f"jax_seconds: {jax_elapsed:.6f}")
+    print(f"numba_seconds: {cpu_elapsed:.6f}")
+    print(f"{backend_label}_seconds: {jax_elapsed:.6f}")
     print(f"speedup: {cpu_elapsed / jax_elapsed:.3f}x")
-    print("Max absolute differences vs CPU:")
+    print("Max absolute differences vs numba:")
     for key in (
         "position_collection",
         "director_collection",
