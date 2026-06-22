@@ -63,7 +63,9 @@ def main() -> None:
     config = benchmark_config(n_snakes=n_snakes, n_elem=args.n_elem, dt=args.dt)
     final_time = np.float64(args.steps * args.dt)
 
+    numba_instantiate_start = time.perf_counter()
     cpu_sim, cpu_rods = build_cpu_sim(**config)
+    numba_instantiate_elapsed = time.perf_counter() - numba_instantiate_start
     cpu_stepper = ea.PositionVerlet()
     time_value = np.float64(0.0)
     start = time.perf_counter()
@@ -74,11 +76,14 @@ def main() -> None:
     cpu_state = collect_cpu_state(cpu_rods)
 
     with jax.default_device(device):
+        jax_instantiate_start = time.perf_counter()
         jax_sim, jax_block = build_jax_sim(
             device=device,
             device_dtype=dtype,
             **config,
         )
+        jax.block_until_ready(jax_block.position_collection_device)
+        jax_instantiate_elapsed = time.perf_counter() - jax_instantiate_start
         jax_stepper = ea.PositionVerletGPU()
         for _ in range(args.warmup_runs):
             initial_state = dict(jax_block.jax_get_state())
@@ -109,6 +114,8 @@ def main() -> None:
         f"n_elem: {args.n_elem}",
         f"steps: {args.steps}",
         f"dt: {args.dt}",
+        f"numba_instantiate_seconds: {numba_instantiate_elapsed:.6f}",
+        f"{backend_label}_instantiate_seconds: {jax_instantiate_elapsed:.6f}",
         f"numba_seconds: {cpu_elapsed:.6f}",
         f"{backend_label}_seconds: {jax_elapsed:.6f}",
         f"speedup: {cpu_elapsed / jax_elapsed:.3f}x",
