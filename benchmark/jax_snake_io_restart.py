@@ -1,0 +1,144 @@
+"""Benchmark multi-snake save/load and restart I/O: Numba vs JAX."""
+
+from __future__ import annotations
+
+import argparse
+import tempfile
+import time
+from pathlib import Path
+
+import numpy as np
+
+from _jax_snake_common import (
+    DEFAULT_DT,
+    DEFAULT_N_ELEM,
+    DEFAULT_N_SNAKES_EXP,
+    benchmark_config,
+    build_cpu_sim,
+    build_jax_sim,
+    emit_report,
+    load_jax_state_npz,
+    restore_jax_state_from_host,
+    save_jax_state_npz,
+    select_device,
+    snake_count_from_exponent,
+    snapshot_jax_state_to_host,
+    time_average,
+    validate_dtype_for_device,
+)
+
+import elastica as ea
+
+try:
+    import jax
+except ModuleNotFoundError as exc:  # pragma: no cover
+    raise SystemExit(
+        "This benchmark requires JAX. Install the optional GPU extra first."
+    ) from exc
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--backend", choices=("auto", "cpu", "cuda", "mps"), default="cuda")
+    parser.add_argument("--dtype", choices=("float32", "float64"), default="float64")
+    parser.add_argument("--n-snakes-exp", type=int, default=DEFAULT_N_SNAKES_EXP)
+    parser.add_argument("--n-elem", type=int, default=DEFAULT_N_ELEM)
+    parser.add_argument("--dt", type=float, default=DEFAULT_DT)
+    parser.add_argument("--iterations", type=int, default=10)
+    parser.add_argument("--log", type=Path, default=None)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    assert args.n_elem > 1, "n-elem must be greater than 1."
+    assert args.dt > 0.0, "dt must be positive."
+    assert args.iterations > 0, "iterations must be positive."
+
+    n_snakes = snake_count_from_exponent(args.n_snakes_exp)
+    device = select_device(args.backend)
+    dtype = np.dtype(np.float32 if args.dtype == "float32" else np.float64)
+    validate_dtype_for_device(dtype, device)
+    backend_label = "jax-cpu" if device.platform == "cpu" else f"jax-{device.platform}"
+    config = benchmark_config(n_snakes=n_snakes, n_elem=args.n_elem, dt=args.dt)
+
+    with tempfile.TemporaryDirectory(prefix="snake_restart_io_") as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        numba_dir = tmp_path / "numba_restart"
+        jax_file = tmp_path / "jax_block_state.npz"
+
+        cpu_sim, _ = build_cpu_sim(**config)
+        ea.save_state(cpu_sim, directory=str(numba_dir), time=np.float64(0.0))
+        cpu_load_sim, _ = build_cpu_sim(**config)
+
+        def _instantiate_numba_sim() -> None:
+            build_cpu_sim(**config)
+
+        numba_instantiate_avg = time_average(args.iterations, _instantiate_numba_sim)
+        numba_save_avg = time_average(
+            args.iterations,
+            lambda: ea.save_state(cpu_sim, directory=str(numba_dir), time=np.float64(0.0)),
+        )
+        numba_load_avg = time_average(
+            args.iterations,
+            lambda: ea.load_state(cpu_load_sim, directory=str(numba_dir)),
+        )
+
+        with jax.default_device(device):
+            jax_sim, jax_block = build_jax_sim(
+                device=device,
+                device_dtype=dtype,
+                **config,
+            )
+            jax.block_until_ready(jax_block.position_collection_device)
+            initial_host_state = snapshot_jax_state_to_host(jax_block.jax_get_state())
+            save_jax_state_npz(jax_file, initial_host_state)
+
+            def _instantiate_jax_sim() -> None:
+                _, block = build_jax_sim(
+                    device=device,
+                    device_dtype=dtype,
+                    **config,
+                )
+                jax.block_until_ready(block.position_collection_device)
+
+            jax_instantiate_avg = time_average(args.iterations, _instantiate_jax_sim)
+
+            jax_save_avg = time_average(
+                args.iterations,
+                lambda: save_jax_state_npz(
+                    jax_file,
+                    snapshot_jax_state_to_host(jax_block.jax_get_state()),
+                ),
+            )
+
+            def _load_jax_state() -> None:
+                restored_host_state = load_jax_state_npz(jax_file)
+                restored_state = restore_jax_state_from_host(
+                    restored_host_state,
+                    device,
+                )
+                jax.block_until_ready(restored_state["position_collection"])
+                jax_block.jax_set_state(restored_state)
+
+            jax_load_avg = time_average(args.iterations, _load_jax_state)
+
+    report_lines = [
+        f"device: {device}",
+        f"dtype: {dtype}",
+        f"n_snakes: {n_snakes}",
+        f"n_elem: {args.n_elem}",
+        f"iterations: {args.iterations}",
+        f"numba_instantiate_avg_seconds: {numba_instantiate_avg:.6f}",
+        f"numba_save_avg_seconds: {numba_save_avg:.6f}",
+        f"numba_load_avg_seconds: {numba_load_avg:.6f}",
+        f"{backend_label}_instantiate_avg_seconds: {jax_instantiate_avg:.6f}",
+        f"{backend_label}_save_avg_seconds: {jax_save_avg:.6f}",
+        f"{backend_label}_load_avg_seconds: {jax_load_avg:.6f}",
+        f"temp_dir: {tmp_path}",
+    ]
+    emit_report(report_lines, args.log)
+
+
+if __name__ == "__main__":
+    main()
