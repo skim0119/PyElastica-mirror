@@ -15,7 +15,8 @@ def _jax_get_rotation_matrix(scale, axis_collection):
 
     theta = theta * scale
     sin_theta = jnp.sin(theta)
-    one_minus_cos_theta = 1.0 - jnp.cos(theta)
+    half_theta = 0.5 * theta
+    one_minus_cos_theta = 2.0 * jnp.sin(half_theta) * jnp.sin(half_theta)
 
     entries = (
         1.0 - one_minus_cos_theta * (v1 * v1 + v2 * v2),
@@ -32,6 +33,16 @@ def _jax_get_rotation_matrix(scale, axis_collection):
 
 
 def _jax_inv_rotate(director_collection):
+    """Extract relative rotation vectors between consecutive directors.
+
+    Notes
+    -----
+    This routine mirrors :func:`elastica._rotations._inv_rotate`, but exact
+    bitwise agreement with the Numba path is not expected in general. The map
+    includes trace accumulation, ``arccos`` near 1, and ``theta / sin(theta)``,
+    so backend-level floating-point differences can produce tiny discrepancies
+    even when the input directors agree to machine precision.
+    """
     current = director_collection[:, :, :-1]
     nxt = director_collection[:, :, 1:]
 

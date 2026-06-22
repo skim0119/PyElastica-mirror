@@ -56,7 +56,7 @@ def _get_rotation_matrix(
 
         theta *= scale
         u_prefix = sin(theta)
-        u_sq_prefix = 1.0 - cos(theta)
+        u_sq_prefix = 2.0 * sin(0.5 * theta) * sin(0.5 * theta)
 
         rot_mat[0, 0, k] = 1.0 - u_sq_prefix * (v1 * v1 + v2 * v2)
         rot_mat[1, 1, k] = 1.0 - u_sq_prefix * (v0 * v0 + v2 * v2)

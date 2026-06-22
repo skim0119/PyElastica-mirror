@@ -65,6 +65,7 @@ from elastica.modules.constraints import Constraints
 from elastica.modules.forcing import Forcing
 from elastica.modules.damping import Damping
 from elastica.modules.contact import Contact
+from elastica.modules.jax_ops import JAXOps
 
 from elastica.transformations import inv_skew_symmetrize
 from elastica.transformations import rotate
@@ -83,6 +84,15 @@ from elastica.timestepper import (
     extend_stepper_interface,
 )
 from elastica.timestepper.symplectic_steppers import PositionVerlet, PEFRL
+from elastica.timestepper.gpu_steppers import PositionVerletGPU
 from elastica.memory_block.memory_block_rigid_body import MemoryBlockRigidBody
 from elastica.memory_block.memory_block_rod import MemoryBlockCosseratRod
+from elastica.memory_block.memory_block_rod_jax import MemoryBlockCosseratRodJax
+from elastica.jax_operation import (
+    NoOpsJax,
+    OneEndFixedJax,
+    EndpointForcesJax,
+    AnalyticalLinearDamperJax,
+    GravityAnalyticalDamperJax,
+)
 from elastica.restart import save_state, load_state
