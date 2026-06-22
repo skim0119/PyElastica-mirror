@@ -71,11 +71,11 @@ def _constrain_first_sphere_values(
     fixed_director: jax.Array,
 ) -> dict[str, jax.Array]:
     updated = dict(state)
-    updated["position_collection"] = state["position_collection"].at[:, 0].set(
-        fixed_position
+    updated["position_collection"] = (
+        state["position_collection"].at[:, 0].set(fixed_position)
     )
-    updated["director_collection"] = state["director_collection"].at[:, :, 0].set(
-        fixed_director
+    updated["director_collection"] = (
+        state["director_collection"].at[:, :, 0].set(fixed_director)
     )
     return updated
 
@@ -87,8 +87,8 @@ def _constrain_first_sphere_rates(
     updated = dict(state)
     updated["velocity_collection"] = state["velocity_collection"].at[:, 0].set(0.0)
     updated["omega_collection"] = state["omega_collection"].at[:, 0].set(0.0)
-    updated["acceleration_collection"] = state["acceleration_collection"].at[:, 0].set(
-        0.0
+    updated["acceleration_collection"] = (
+        state["acceleration_collection"].at[:, 0].set(0.0)
     )
     updated["alpha_collection"] = state["alpha_collection"].at[:, 0].set(0.0)
     return updated
@@ -117,14 +117,16 @@ class ManySphereSpringJAXSimulator(ea.BaseSystemCollection):
 
     def _finalize_jax_state(self) -> None:
         final_systems = tuple(self.final_systems())
-        assert len(final_systems) == 1, (
-            "ManySphereSpringJAXSimulator expects exactly one block system after finalize."
-        )
+        assert (
+            len(final_systems) == 1
+        ), "ManySphereSpringJAXSimulator expects exactly one block system after finalize."
         block = final_systems[0]
-        assert isinstance(block, ea.MemoryBlockRigidBodyJax), (
-            "ManySphereSpringJAXSimulator requires MemoryBlockRigidBodyJax block support."
-        )
-        assert block.n_elems >= 2, "ManySphereSpringJAXSimulator needs at least two spheres."
+        assert isinstance(
+            block, ea.MemoryBlockRigidBodyJax
+        ), "ManySphereSpringJAXSimulator requires MemoryBlockRigidBodyJax block support."
+        assert (
+            block.n_elems >= 2
+        ), "ManySphereSpringJAXSimulator needs at least two spheres."
 
         self._block = block
 
@@ -132,9 +134,9 @@ class ManySphereSpringJAXSimulator(ea.BaseSystemCollection):
             np.diff(block.position_collection, axis=1),
             axis=0,
         )
-        assert np.all(rest_lengths > 0.0), (
-            "Adjacent spheres must start at distinct positions to define spring rest lengths."
-        )
+        assert np.all(
+            rest_lengths > 0.0
+        ), "Adjacent spheres must start at distinct positions to define spring rest lengths."
 
         reference_device = block.position_collection_device.device
         device_dtype = block.device_dtype
@@ -169,12 +171,12 @@ class ManySphereSpringJAXSimulator(ea.BaseSystemCollection):
         time: np.float64,
     ) -> tuple[dict[str, jax.Array], ...]:
         assert len(states) == 1, "ManySphereSpringJAXSimulator expects one block state."
-        assert self._fixed_position_device is not None, (
-            "Pinned-position metadata must be initialized during finalize()."
-        )
-        assert self._fixed_director_device is not None, (
-            "Pinned-director metadata must be initialized during finalize()."
-        )
+        assert (
+            self._fixed_position_device is not None
+        ), "Pinned-position metadata must be initialized during finalize()."
+        assert (
+            self._fixed_director_device is not None
+        ), "Pinned-director metadata must be initialized during finalize()."
         return (
             _constrain_first_sphere_values(
                 states[0],
@@ -189,18 +191,18 @@ class ManySphereSpringJAXSimulator(ea.BaseSystemCollection):
         time: np.float64,
     ) -> tuple[dict[str, jax.Array], ...]:
         assert len(states) == 1, "ManySphereSpringJAXSimulator expects one block state."
-        assert self._gravity_device is not None, (
-            "Gravity metadata must be initialized during finalize()."
-        )
-        assert self._rest_lengths_device is not None, (
-            "Spring metadata must be initialized during finalize()."
-        )
-        assert self._spring_constant_device is not None, (
-            "Spring metadata must be initialized during finalize()."
-        )
-        assert self._damping_constant_device is not None, (
-            "Damping metadata must be initialized during finalize()."
-        )
+        assert (
+            self._gravity_device is not None
+        ), "Gravity metadata must be initialized during finalize()."
+        assert (
+            self._rest_lengths_device is not None
+        ), "Spring metadata must be initialized during finalize()."
+        assert (
+            self._spring_constant_device is not None
+        ), "Spring metadata must be initialized during finalize()."
+        assert (
+            self._damping_constant_device is not None
+        ), "Damping metadata must be initialized during finalize()."
         return (
             _apply_gravity_and_springs(
                 states[0],
@@ -289,9 +291,9 @@ def build_simulator(
     damping_constant: float,
 ) -> tuple[ManySphereSpringJAXSimulator, ea.MemoryBlockRigidBodyJax, list[ea.Sphere]]:
     assert n_spheres >= 2, "n_spheres must be at least 2."
-    assert spacing > 2.0 * sphere_radius, (
-        "spacing must exceed the sphere diameter so adjacent centers are distinct."
-    )
+    assert (
+        spacing > 2.0 * sphere_radius
+    ), "spacing must exceed the sphere diameter so adjacent centers are distinct."
 
     _ConfiguredRigidBodyMemoryBlock.device = device
     _ConfiguredRigidBodyMemoryBlock.device_dtype = np.dtype(device_dtype)
@@ -312,9 +314,9 @@ def build_simulator(
 
     simulator.finalize()
     block = tuple(simulator.final_systems())[0]
-    assert isinstance(block, ea.MemoryBlockRigidBodyJax), (
-        "Rigid-body GPU example expected a JAX rigid-body memory block."
-    )
+    assert isinstance(
+        block, ea.MemoryBlockRigidBodyJax
+    ), "Rigid-body GPU example expected a JAX rigid-body memory block."
     return simulator, block, spheres
 
 
