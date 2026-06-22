@@ -114,6 +114,7 @@ def build_cpu_sim(
     poisson_ratio: float,
     gravitational_acc: float,
     time_step: float,
+    include_external_loads: bool = True,
 ) -> tuple[MultiSnakeReferenceSimulator, list[ea.CosseratRod]]:
     b_coeff = default_b_coeff()
     normal = np.array([0.0, 1.0, 0.0], dtype=np.float64)
@@ -125,11 +126,12 @@ def build_cpu_sim(
 
     sim = MultiSnakeReferenceSimulator()
     rods: list[ea.CosseratRod] = []
-    ground_plane = ea.Plane(
-        plane_origin=np.array([0.0, -base_length * 0.011, 0.0], dtype=np.float64),
-        plane_normal=normal,
-    )
-    sim.append(ground_plane)
+    if include_external_loads:
+        ground_plane = ea.Plane(
+            plane_origin=np.array([0.0, -base_length * 0.011, 0.0], dtype=np.float64),
+            plane_normal=normal,
+        )
+        sim.append(ground_plane)
 
     for idx in range(n_snakes):
         rod = build_rod(
@@ -142,35 +144,36 @@ def build_cpu_sim(
         start = snake_start(idx, spacing)
         rod.position_collection[...] = rod.position_collection + start[:, None]
         sim.append(rod)
-        sim.add_forcing_to(rod).using(
-            ea.GravityForces,
-            acc_gravity=np.array([0.0, gravitational_acc, 0.0], dtype=np.float64),
-        )
-        sim.add_forcing_to(rod).using(
-            ea.MuscleTorques,
-            base_length=base_length,
-            b_coeff=b_coeff[:-1],
-            period=period,
-            wave_number=2.0 * np.pi / wave_length,
-            phase_shift=0.0,
-            rest_lengths=rod.rest_lengths,
-            ramp_up_time=period,
-            direction=normal,
-            with_spline=True,
-        )
-        sim.detect_contact_between(rod, ground_plane).using(
-            ea.RodPlaneContactWithAnisotropicFriction,
-            k=1.0,
-            nu=1.0e-6,
-            slip_velocity_tol=1.0e-8,
-            static_mu_array=static_mu_array,
-            kinetic_mu_array=kinetic_mu_array,
-        )
-        sim.dampen(rod).using(
-            ea.AnalyticalLinearDamper,
-            damping_constant=DEFAULT_DAMPING,
-            time_step=time_step,
-        )
+        if include_external_loads:
+            sim.add_forcing_to(rod).using(
+                ea.GravityForces,
+                acc_gravity=np.array([0.0, gravitational_acc, 0.0], dtype=np.float64),
+            )
+            sim.add_forcing_to(rod).using(
+                ea.MuscleTorques,
+                base_length=base_length,
+                b_coeff=b_coeff[:-1],
+                period=period,
+                wave_number=2.0 * np.pi / wave_length,
+                phase_shift=0.0,
+                rest_lengths=rod.rest_lengths,
+                ramp_up_time=period,
+                direction=normal,
+                with_spline=True,
+            )
+            sim.detect_contact_between(rod, ground_plane).using(
+                ea.RodPlaneContactWithAnisotropicFriction,
+                k=1.0,
+                nu=1.0e-6,
+                slip_velocity_tol=1.0e-8,
+                static_mu_array=static_mu_array,
+                kinetic_mu_array=kinetic_mu_array,
+            )
+            sim.dampen(rod).using(
+                ea.AnalyticalLinearDamper,
+                damping_constant=DEFAULT_DAMPING,
+                time_step=time_step,
+            )
         rods.append(rod)
 
     sim.finalize()
@@ -190,6 +193,7 @@ def build_jax_sim(
     poisson_ratio: float,
     gravitational_acc: float,
     time_step: float,
+    include_external_loads: bool = True,
 ) -> tuple[MultiSnakeJAXSimulator, ea.MemoryBlockCosseratRodJax]:
     b_coeff = default_b_coeff()
     mu = base_length / (period * period * np.abs(gravitational_acc) * DEFAULT_FROUDE)
@@ -213,28 +217,31 @@ def build_jax_sim(
         start = snake_start(idx, spacing)
         rod.position_collection[...] = rod.position_collection + start[:, None]
         sim.append(rod)
-        sim.using(rod).operate(
-            SnakeMuscleTorquesJax,
-            b_coeff=b_coeff,
-            period=period,
-            base_length=base_length,
-            gravitational_acc=gravitational_acc,
-        )
-        sim.using(rod).operate(
-            SnakePlaneContactJax,
-            plane_origin=np.array([0.0, -base_length * 0.011, 0.0], dtype=np.float64),
-            plane_normal=np.array([0.0, 1.0, 0.0], dtype=np.float64),
-            slip_velocity_tol=1.0e-8,
-            k=1.0,
-            nu=1.0e-6,
-            static_mu_array=static_mu_array,
-            kinetic_mu_array=kinetic_mu_array,
-        )
-        sim.using(rod).operate(
-            ea.AnalyticalLinearDamperJax,
-            time_step=np.float64(time_step),
-            damping_constant=DEFAULT_DAMPING,
-        )
+        if include_external_loads:
+            sim.using(rod).operate(
+                SnakeMuscleTorquesJax,
+                b_coeff=b_coeff,
+                period=period,
+                base_length=base_length,
+                gravitational_acc=gravitational_acc,
+            )
+            sim.using(rod).operate(
+                SnakePlaneContactJax,
+                plane_origin=np.array(
+                    [0.0, -base_length * 0.011, 0.0], dtype=np.float64
+                ),
+                plane_normal=np.array([0.0, 1.0, 0.0], dtype=np.float64),
+                slip_velocity_tol=1.0e-8,
+                k=1.0,
+                nu=1.0e-6,
+                static_mu_array=static_mu_array,
+                kinetic_mu_array=kinetic_mu_array,
+            )
+            sim.using(rod).operate(
+                ea.AnalyticalLinearDamperJax,
+                time_step=np.float64(time_step),
+                damping_constant=DEFAULT_DAMPING,
+            )
 
     sim.finalize()
     block = tuple(sim.final_systems())[0]
@@ -348,6 +355,7 @@ def benchmark_config(
     n_snakes: int,
     n_elem: int,
     dt: float,
+    include_external_loads: bool = True,
 ) -> dict[str, Any]:
     return {
         "n_snakes": n_snakes,
@@ -359,4 +367,5 @@ def benchmark_config(
         "poisson_ratio": DEFAULT_POISSON_RATIO,
         "gravitational_acc": DEFAULT_GRAVITY,
         "time_step": dt,
+        "include_external_loads": include_external_loads,
     }

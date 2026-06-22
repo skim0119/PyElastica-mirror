@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-elem", type=int, default=DEFAULT_N_ELEM)
     parser.add_argument("--dt", type=float, default=DEFAULT_DT)
     parser.add_argument("--iterations", type=int, default=10)
+    parser.add_argument("--no-external-loads", action="store_true")
     parser.add_argument("--log", type=Path, default=None)
     return parser.parse_args()
 
@@ -60,7 +61,12 @@ def main() -> None:
     dtype = np.dtype(np.float32 if args.dtype == "float32" else np.float64)
     validate_dtype_for_device(dtype, device)
     backend_label = "jax-cpu" if device.platform == "cpu" else f"jax-{device.platform}"
-    config = benchmark_config(n_snakes=n_snakes, n_elem=args.n_elem, dt=args.dt)
+    config = benchmark_config(
+        n_snakes=n_snakes,
+        n_elem=args.n_elem,
+        dt=args.dt,
+        include_external_loads=not args.no_external_loads,
+    )
 
     with tempfile.TemporaryDirectory(prefix="snake_restart_io_") as tmp_dir:
         tmp_path = Path(tmp_dir)
@@ -129,6 +135,7 @@ def main() -> None:
         f"n_snakes: {n_snakes}",
         f"n_elem: {args.n_elem}",
         f"iterations: {args.iterations}",
+        f"no_external_loads: {args.no_external_loads}",
         f"numba_instantiate_avg_seconds: {numba_instantiate_avg:.6f}",
         f"numba_save_avg_seconds: {numba_save_avg:.6f}",
         f"numba_load_avg_seconds: {numba_load_avg:.6f}",

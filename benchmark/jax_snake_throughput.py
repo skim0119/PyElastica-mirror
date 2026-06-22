@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
     parser.add_argument("--dt", type=float, default=DEFAULT_DT)
     parser.add_argument("--warmup-runs", type=int, default=1)
+    parser.add_argument("--no-external-loads", action="store_true")
     parser.add_argument(
         "--transfer-guard",
         choices=("allow", "log", "disallow", "log_explicit", "disallow_explicit"),
@@ -66,7 +67,12 @@ def main() -> None:
     dtype = np.dtype(np.float32 if args.dtype == "float32" else np.float64)
     validate_dtype_for_device(dtype, device)
     backend_label = "jax-cpu" if device.platform == "cpu" else f"jax-{device.platform}"
-    config = benchmark_config(n_snakes=n_snakes, n_elem=args.n_elem, dt=args.dt)
+    config = benchmark_config(
+        n_snakes=n_snakes,
+        n_elem=args.n_elem,
+        dt=args.dt,
+        include_external_loads=not args.no_external_loads,
+    )
     final_time = np.float64(args.steps * args.dt)
 
     numba_instantiate_start = time.perf_counter()
@@ -140,6 +146,7 @@ def main() -> None:
         f"steps: {args.steps}",
         f"dt: {args.dt}",
         f"warmup_runs: {args.warmup_runs}",
+        f"no_external_loads: {args.no_external_loads}",
         f"transfer_guard: {args.transfer_guard}",
         f"numba_instantiate_seconds: {numba_instantiate_elapsed:.6f}",
         f"{backend_label}_instantiate_seconds: {jax_instantiate_elapsed:.6f}",
